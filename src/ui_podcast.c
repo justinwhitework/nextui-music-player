@@ -149,7 +149,7 @@ void Podcast_clearArtwork(void) {
 }
 
 // Thumbnail cache for subscription artwork on main page
-#define THUMBNAIL_CACHE_SIZE 8
+#define THUMBNAIL_CACHE_SIZE 64
 typedef struct {
     char feed_id[17];
     SDL_Surface* thumbnail;
