@@ -294,6 +294,78 @@ void adjust_list_scroll(int selected, int* scroll, int items_per_page) {
     }
 }
 
+bool list_page_up(int *selected, int *scroll, int total_count, int items_per_page) {
+    if (items_per_page < 1) {
+        items_per_page = 1;
+    }
+
+    int old_scroll   = *scroll;
+    int old_selected = *selected;
+    int relative_pos = *selected - *scroll;
+    if (relative_pos < 0) {
+        relative_pos = 0;
+    } else if (relative_pos > items_per_page) {
+        relative_pos = items_per_page;
+    }
+
+    *scroll -= items_per_page;
+    if (*scroll < 0) {
+        *scroll = 0;
+    }
+
+    // keep position of selected item on the screen, snap to the first item if needed
+    if (*scroll == old_scroll) {
+        *selected = 0;
+    } else {
+        *selected = *scroll + relative_pos;
+    }
+
+    if (*selected < 0) {
+        *selected = 0;
+    } else if (*selected >= total_count) {
+        *selected = total_count - 1;
+    }
+
+    return (*scroll != old_scroll || *selected != old_selected);
+}
+
+bool list_page_down(int *selected, int *scroll, int total_count, int items_per_page) {
+    if (items_per_page < 1) {
+        items_per_page = 1;
+    }
+
+    int old_scroll   = *scroll;
+    int old_selected = *selected;
+    int max_scroll   = (total_count > items_per_page) ? total_count - items_per_page : 0;
+
+    int relative_pos = *selected - *scroll;
+    if (relative_pos < 0) {
+        relative_pos = 0;
+    } else if (relative_pos > items_per_page) {
+        relative_pos = items_per_page;
+    }
+
+    *scroll += items_per_page;
+    if (*scroll > max_scroll) {
+        *scroll = max_scroll;
+    }
+
+    // keep position of selected item on the screen, snap to the last item if needed
+    if (*scroll == old_scroll) {
+        *selected = total_count - 1;
+    } else {
+        *selected = *scroll + relative_pos;
+    }
+
+    if (*selected >= total_count) {
+        *selected = total_count - 1;
+    } else if (*selected < 0) {
+        *selected = 0;
+    }
+
+    return (*scroll != old_scroll || *selected != old_selected);
+}
+
 // Render scroll up/down indicators for lists
 void render_scroll_indicators(SDL_Surface* screen, int scroll, int items_per_page, int total_count) {
     if (total_count <= items_per_page) return;

@@ -317,6 +317,14 @@ static bool handle_browser_input(PlayerInternalState *state, int *dirty) {
                 *dirty = 1;
             }
         }
+        else if (PAD_justPressed(BTN_LEFT)) {
+            list_page_up(&browser.selected, &browser.scroll_offset, browser.entry_count, browser.items_per_page);
+            *dirty = 1;
+        }
+        else if (PAD_justPressed(BTN_RIGHT)) {
+            list_page_down(&browser.selected, &browser.scroll_offset, browser.entry_count, browser.items_per_page);
+            *dirty = 1;
+        }
     }
 
     // Animate browser scroll

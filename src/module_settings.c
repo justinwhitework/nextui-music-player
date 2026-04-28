@@ -7,6 +7,7 @@
 #include "selfupdate.h"
 #include "downloader.h"
 #include "ui_settings.h"
+#include "ui_utils.h"
 #include "ui_system.h"
 #include "wifi.h"
 #include "album_art.h"
@@ -37,6 +38,7 @@ typedef enum {
 ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
     SettingsState state = SETTINGS_STATE_MENU;
     int menu_selected = 0;
+    int menu_scroll = 0;
     int dirty = 1;
     int show_setting = 0;
 
@@ -72,7 +74,7 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                         dirty = 1;
                     }
                 }
-                // Left/Right for cyclable settings
+                // Left/Right for cyclable settings; page navigation for others
                 else if (PAD_justPressed(BTN_LEFT)) {
                     if (menu_selected == SETTINGS_ITEM_SCREEN_OFF) {
                         Settings_cycleScreenOffPrev();
@@ -82,6 +84,10 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                         dirty = 1;
                     } else if (menu_selected == SETTINGS_ITEM_SOFT_LIMITER) {
                         Settings_cycleSoftLimiterPrev();
+                        dirty = 1;
+                    } else {
+                        int items_per_page = calc_list_layout(screen).items_per_page;
+                        list_page_up(&menu_selected, &menu_scroll, SETTINGS_ITEM_COUNT, items_per_page);
                         dirty = 1;
                     }
                 }
@@ -94,6 +100,10 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                         dirty = 1;
                     } else if (menu_selected == SETTINGS_ITEM_SOFT_LIMITER) {
                         Settings_cycleSoftLimiterNext();
+                        dirty = 1;
+                    } else {
+                        int items_per_page = calc_list_layout(screen).items_per_page;
+                        list_page_down(&menu_selected, &menu_scroll, SETTINGS_ITEM_COUNT, items_per_page);
                         dirty = 1;
                     }
                 }

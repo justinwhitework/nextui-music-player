@@ -206,6 +206,7 @@ ModuleExitReason RadioModule_run(SDL_Surface* screen) {
         if (state == RADIO_INTERNAL_LIST) {
             RadioStation* stations;
             int station_count = Radio_getStations(&stations);
+            int items_per_page = calc_list_layout(screen).items_per_page;
 
             if (PAD_justRepeated(BTN_UP) && station_count > 0) {
                 radio_selected = (radio_selected > 0) ? radio_selected - 1 : station_count - 1;
@@ -213,6 +214,14 @@ ModuleExitReason RadioModule_run(SDL_Surface* screen) {
             }
             else if (PAD_justRepeated(BTN_DOWN) && station_count > 0) {
                 radio_selected = (radio_selected < station_count - 1) ? radio_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT) && station_count > 0) {
+                list_page_up(&radio_selected, &radio_scroll, station_count, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT) && station_count > 0) {
+                list_page_down(&radio_selected, &radio_scroll, station_count, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A) && station_count > 0) {
@@ -398,6 +407,7 @@ ModuleExitReason RadioModule_run(SDL_Surface* screen) {
         // =========================================
         else if (state == RADIO_INTERNAL_ADD_COUNTRY) {
             int country_count = Radio_getCuratedCountryCount();
+            int items_per_page = calc_list_layout(screen).items_per_page;
 
             if (PAD_justRepeated(BTN_UP) && country_count > 0) {
                 add_country_selected = (add_country_selected > 0) ? add_country_selected - 1 : country_count - 1;
@@ -405,6 +415,14 @@ ModuleExitReason RadioModule_run(SDL_Surface* screen) {
             }
             else if (PAD_justRepeated(BTN_DOWN) && country_count > 0) {
                 add_country_selected = (add_country_selected < country_count - 1) ? add_country_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT) && country_count > 0) {
+                list_page_up(&add_country_selected, &add_country_scroll, country_count, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT) && country_count > 0) {
+                list_page_down(&add_country_selected, &add_country_scroll, country_count, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A) && country_count > 0) {
@@ -433,6 +451,7 @@ ModuleExitReason RadioModule_run(SDL_Surface* screen) {
         else if (state == RADIO_INTERNAL_ADD_STATIONS) {
             int station_count = 0;
             const CuratedStation* stations = Radio_getCuratedStations(add_selected_country_code, &station_count);
+            int items_per_page = calc_list_layout(screen).items_per_page;
 
             if (PAD_justRepeated(BTN_UP) && sorted_station_count > 0) {
                 add_station_selected = (add_station_selected > 0) ? add_station_selected - 1 : sorted_station_count - 1;
@@ -440,6 +459,14 @@ ModuleExitReason RadioModule_run(SDL_Surface* screen) {
             }
             else if (PAD_justRepeated(BTN_DOWN) && sorted_station_count > 0) {
                 add_station_selected = (add_station_selected < sorted_station_count - 1) ? add_station_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT) && sorted_station_count > 0) {
+                list_page_up(&add_station_selected, &add_station_scroll, sorted_station_count, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT) && sorted_station_count > 0) {
+                list_page_down(&add_station_selected, &add_station_scroll, sorted_station_count, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A) && sorted_station_count > 0) {

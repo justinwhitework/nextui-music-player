@@ -133,6 +133,7 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
 
         if (state == PLAYLIST_INTERNAL_LIST) {
             int total_items = playlist_count;
+            int items_per_page = calc_list_layout(screen).items_per_page;
 
             if (PAD_justPressed(BTN_B)) {
                 GFX_clearLayers(LAYER_SCROLLTEXT);
@@ -144,6 +145,14 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
             }
             else if (total_items > 0 && PAD_justRepeated(BTN_DOWN)) {
                 list_selected = (list_selected < total_items - 1) ? list_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT)) {
+                list_page_up(&list_selected, &list_scroll, playlist_count, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT)) {
+                list_page_down(&list_selected, &list_scroll, playlist_count, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A)) {
@@ -201,6 +210,7 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
 
         } else if (state == PLAYLIST_INTERNAL_DETAIL) {
             int total_items = detail_track_count;
+            int items_per_page = calc_list_layout(screen).items_per_page;
 
             if (PAD_justPressed(BTN_B)) {
                 GFX_clearLayers(LAYER_SCROLLTEXT);
@@ -214,6 +224,14 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
             }
             else if (total_items > 0 && PAD_justRepeated(BTN_DOWN)) {
                 detail_selected = (detail_selected < total_items - 1) ? detail_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT)) {
+                list_page_up(&detail_selected, &detail_scroll, detail_track_count, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT)) {
+                list_page_down(&detail_selected, &detail_scroll, detail_track_count, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A)) {

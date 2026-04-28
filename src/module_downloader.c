@@ -10,6 +10,7 @@
 #include "module_library.h"
 #include "downloader.h"
 #include "ui_downloader.h"
+#include "ui_utils.h"
 #include "wifi.h"
 
 // Menu count
@@ -98,12 +99,23 @@ ModuleExitReason DownloaderModule_run(SDL_Surface* screen) {
         // MENU STATE
         // =========================================
         if (state == DOWNLOADER_INTERNAL_MENU) {
+            int items_per_page = calc_list_layout(screen).items_per_page;
             if (PAD_justRepeated(BTN_UP)) {
                 menu_selected = (menu_selected > 0) ? menu_selected - 1 : DOWNLOADER_MENU_COUNT - 1;
                 dirty = 1;
             }
             else if (PAD_justRepeated(BTN_DOWN)) {
                 menu_selected = (menu_selected < DOWNLOADER_MENU_COUNT - 1) ? menu_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT)) {
+                int scroll = 0;
+                list_page_up(&menu_selected, &scroll, DOWNLOADER_MENU_COUNT, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT)) {
+                int scroll = 0;
+                list_page_down(&menu_selected, &scroll, DOWNLOADER_MENU_COUNT, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A)) {
@@ -180,6 +192,7 @@ ModuleExitReason DownloaderModule_run(SDL_Surface* screen) {
         // RESULTS STATE
         // =========================================
         else if (state == DOWNLOADER_INTERNAL_RESULTS) {
+            int items_per_page = calc_list_layout(screen).items_per_page;
             if (PAD_justRepeated(BTN_UP) && result_count > 0) {
                 if (results_selected < 0) {
                     results_selected = result_count - 1;
@@ -194,6 +207,14 @@ ModuleExitReason DownloaderModule_run(SDL_Surface* screen) {
                 } else {
                     results_selected = (results_selected < result_count - 1) ? results_selected + 1 : 0;
                 }
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT) && result_count > 0) {
+                list_page_up(&results_selected, &results_scroll, result_count, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT) && result_count > 0) {
+                list_page_down(&results_selected, &results_scroll, result_count, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A) && result_count > 0 && results_selected >= 0) {
@@ -234,6 +255,7 @@ ModuleExitReason DownloaderModule_run(SDL_Surface* screen) {
         // =========================================
         else if (state == DOWNLOADER_INTERNAL_QUEUE) {
             int qcount = Downloader_queueCount();
+            int items_per_page = calc_list_layout(screen).list_h / (SCALE1(PILL_SIZE) * 3 / 2);
 
             if (PAD_justRepeated(BTN_UP) && qcount > 0) {
                 queue_selected = (queue_selected > 0) ? queue_selected - 1 : qcount - 1;
@@ -241,6 +263,14 @@ ModuleExitReason DownloaderModule_run(SDL_Surface* screen) {
             }
             else if (PAD_justRepeated(BTN_DOWN) && qcount > 0) {
                 queue_selected = (queue_selected < qcount - 1) ? queue_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT) && qcount > 0) {
+                list_page_up(&queue_selected, &queue_scroll, qcount, items_per_page);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT) && qcount > 0) {
+                list_page_down(&queue_selected, &queue_scroll, qcount, items_per_page);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A) && qcount > 0) {

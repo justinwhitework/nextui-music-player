@@ -66,6 +66,16 @@ void render_screen_header(SDL_Surface* screen, const char* title, int show_setti
 // Adjust scroll offset to keep selected item visible
 void adjust_list_scroll(int selected, int* scroll, int items_per_page);
 
+// Page toward the beginning of the list (lower indices), adusting scroll position and selection accordingly.
+// Returns true if selection or scroll changed.
+// Note: non-positive items_per_page is treated as 1.
+bool list_page_up(int *selected, int *scroll, int total_count, int items_per_page);
+
+// Page toward the end of the list (higher indices), adusting scroll position and selection accordingly.
+// Returns true if selection or scroll changed
+// Note: non-positive items_per_page is treated as 1.
+bool list_page_down(int *selected, int *scroll, int total_count, int items_per_page);
+
 // Render scroll up/down indicators for lists
 void render_scroll_indicators(SDL_Surface* screen, int scroll, int items_per_page, int total_count);
 

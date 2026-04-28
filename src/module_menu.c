@@ -6,6 +6,7 @@
 #include "module_common.h"
 #include "module_menu.h"
 #include "ui_main.h"
+#include "ui_utils.h"
 #include "resume.h"
 #include "background.h"
 
@@ -50,6 +51,7 @@ int MenuModule_run(SDL_Surface* screen) {
         }
 
         // Menu navigation
+        int items_per_page = calc_list_layout(screen).items_per_page;
         if (PAD_justRepeated(BTN_UP)) {
             menu_selected = (menu_selected > 0) ? menu_selected - 1 : item_count - 1;
             GFX_clearLayers(LAYER_SCROLLTEXT);
@@ -57,6 +59,18 @@ int MenuModule_run(SDL_Surface* screen) {
         }
         else if (PAD_justRepeated(BTN_DOWN)) {
             menu_selected = (menu_selected < item_count - 1) ? menu_selected + 1 : 0;
+            GFX_clearLayers(LAYER_SCROLLTEXT);
+            dirty = 1;
+        }
+        else if (PAD_justPressed(BTN_LEFT)) {
+            int scroll = 0;
+            list_page_up(&menu_selected, &scroll, item_count, items_per_page);
+            GFX_clearLayers(LAYER_SCROLLTEXT);
+            dirty = 1;
+        }
+        else if (PAD_justPressed(BTN_RIGHT)) {
+            int scroll = 0;
+            list_page_down(&menu_selected, &scroll, item_count, items_per_page);
             GFX_clearLayers(LAYER_SCROLLTEXT);
             dirty = 1;
         }

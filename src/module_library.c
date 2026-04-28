@@ -66,12 +66,23 @@ ModuleExitReason LibraryModule_run(SDL_Surface* screen) {
         }
 
         // Menu navigation
+        int items_per_page = calc_list_layout(screen).items_per_page;
         if (PAD_justRepeated(BTN_UP)) {
             menu_selected = (menu_selected > 0) ? menu_selected - 1 : LIBRARY_ITEM_COUNT - 1;
             dirty = 1;
         }
         else if (PAD_justRepeated(BTN_DOWN)) {
             menu_selected = (menu_selected < LIBRARY_ITEM_COUNT - 1) ? menu_selected + 1 : 0;
+            dirty = 1;
+        }
+        else if (PAD_justPressed(BTN_LEFT)) {
+            int scroll = 0;
+            list_page_up(&menu_selected, &scroll, LIBRARY_ITEM_COUNT, items_per_page);
+            dirty = 1;
+        }
+        else if (PAD_justPressed(BTN_RIGHT)) {
+            int scroll = 0;
+            list_page_down(&menu_selected, &scroll, LIBRARY_ITEM_COUNT, items_per_page);
             dirty = 1;
         }
         else if (PAD_justPressed(BTN_A)) {
