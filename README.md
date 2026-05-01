@@ -1,7 +1,10 @@
 # NextUI Music Player
 A comprehensive music playback application for NextUI featuring local file playback, online radio streaming, podcast and music downloading.
 
-> **Note:** This is a fork of [mohammadsyuhada/nextui-music-player](https://github.com/mohammadsyuhada/nextui-music-player).
+> **Note:**
+>
+> This is a fork of [mohammadsyuhada/nextui-music-player](https://github.com/mohammadsyuhada/nextui-music-player)<br>
+> [Support](https://ko-fi.com/Y8Y61SI04B) the original author on ko-fi.
 
 ## Supported Platforms
 - **tg5040** - TrimUI Smart Pro / TrimUI Brick / Brick Hammer
