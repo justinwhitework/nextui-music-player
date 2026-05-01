@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 // GitHub repository (format: "owner/repo")
-#define APP_GITHUB_REPO "mohammadsyuhada/nextui-music-player"
+#define APP_GITHUB_REPO "nborodikhin/nextui-music-player"
 
 // Release asset name pattern (the .pak.zip file)
 #define APP_RELEASE_ASSET "Music.Player.pak.zip"
