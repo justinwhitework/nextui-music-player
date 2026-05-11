@@ -200,18 +200,41 @@ def _update_qr_code_h(repo_url):
     print(f"src/qr_code_data.h -> {w}x{h}, {len(data)} bytes")
 
 
+USAGE = """\
+usage: update_version.py [command] [args]
+
+Commands:
+  (none)               Show the current version and its changelog note
+  latest               Same as above
+  list                 List all versions and changelog notes
+  create <ver> <text>  Add a new version entry and update derived files
+  update [<ver>] <text>  Edit a changelog note (defaults to latest version)
+  remove <ver>         Remove a version entry
+  help, -h, --help     Show this help message
+"""
+
+
+def cmd_help():
+    print(USAGE, end="")
+
+
 COMMANDS = {
     "latest": lambda pak, args: cmd_latest(pak),
     "list":   lambda pak, args: cmd_list(pak),
     "update": cmd_update,
     "create": cmd_create,
     "remove": cmd_remove,
+    "help":   lambda pak, args: cmd_help(),
 }
 
 
 def main():
     pak = load_pak()
     args = sys.argv[1:]
+
+    if args and args[0] in ("-h", "--help"):
+        cmd_help()
+        return
 
     if not args or args[0] not in COMMANDS:
         cmd_latest(pak)
