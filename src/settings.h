@@ -47,6 +47,16 @@ const char* Settings_getSoftLimiterDisplayStr(void);
 int Settings_getMaxPlaylists(void);
 int Settings_getPlaylistScanDepth(void);
 
+// Playlist detail background from sidecar artwork
+bool Settings_getPlaylistBgArtwork(void);
+void Settings_togglePlaylistBgArtwork(void);
+const char* Settings_getPlaylistBgArtworkDisplayStr(void);
+
+// List-row thumbnails beside playlists and tracks
+bool Settings_getTooltipArtwork(void);
+void Settings_toggleTooltipArtwork(void);
+const char* Settings_getTooltipArtworkDisplayStr(void);
+
 // Save settings to file (auto-called on change)
 void Settings_save(void);
 

@@ -28,6 +28,8 @@ static struct {
     int soft_limiter_index;
     int max_playlists;
     int playlist_scan_depth;
+    bool playlist_bg_artwork;
+    bool tooltip_artwork;
 } current_settings;
 
 static int clamp_max_playlists(int value) {
@@ -74,6 +76,12 @@ static void apply_config_line(const char* line) {
     if (sscanf(line, "playlist_scan_depth=%d", &value) == 1) {
         current_settings.playlist_scan_depth = clamp_playlist_scan_depth(value);
     }
+    if (sscanf(line, "playlist_bg_artwork=%d", &value) == 1) {
+        current_settings.playlist_bg_artwork = (value != 0);
+    }
+    if (sscanf(line, "tooltip_artwork=%d", &value) == 1) {
+        current_settings.tooltip_artwork = (value != 0);
+    }
 }
 
 static void load_config_file(const char* path) {
@@ -112,6 +120,8 @@ void Settings_init(void) {
     current_settings.soft_limiter_index = DEFAULT_SOFT_LIMITER_INDEX;
     current_settings.max_playlists = DEFAULT_MAX_PLAYLISTS;
     current_settings.playlist_scan_depth = DEFAULT_PLAYLIST_SCAN_DEPTH;
+    current_settings.playlist_bg_artwork = false;
+    current_settings.tooltip_artwork = false;
 
     load_config_file(SETTINGS_FILE);
     load_config_file(OVERRIDES_FILE);
@@ -171,6 +181,8 @@ void Settings_save(void) {
     fprintf(f, "lyrics_enabled=%d\n", current_settings.lyrics_enabled ? 1 : 0);
     fprintf(f, "bass_filter_hz=%d\n", current_settings.bass_filter_hz);
     fprintf(f, "soft_limiter=%d\n", current_settings.soft_limiter_index);
+    fprintf(f, "playlist_bg_artwork=%d\n", current_settings.playlist_bg_artwork ? 1 : 0);
+    fprintf(f, "tooltip_artwork=%d\n", current_settings.tooltip_artwork ? 1 : 0);
     fclose(f);
 }
 
@@ -250,4 +262,30 @@ const char* Settings_getSoftLimiterDisplayStr(void) {
         case 3:  return "Strong";
         default: return "Medium";
     }
+}
+
+bool Settings_getPlaylistBgArtwork(void) {
+    return current_settings.playlist_bg_artwork;
+}
+
+void Settings_togglePlaylistBgArtwork(void) {
+    current_settings.playlist_bg_artwork = !current_settings.playlist_bg_artwork;
+    Settings_save();
+}
+
+const char* Settings_getPlaylistBgArtworkDisplayStr(void) {
+    return current_settings.playlist_bg_artwork ? "On" : "Off";
+}
+
+bool Settings_getTooltipArtwork(void) {
+    return current_settings.tooltip_artwork;
+}
+
+void Settings_toggleTooltipArtwork(void) {
+    current_settings.tooltip_artwork = !current_settings.tooltip_artwork;
+    Settings_save();
+}
+
+const char* Settings_getTooltipArtworkDisplayStr(void) {
+    return current_settings.tooltip_artwork ? "On" : "Off";
 }

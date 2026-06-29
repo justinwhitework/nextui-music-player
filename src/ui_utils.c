@@ -4,6 +4,7 @@
 #include "ui_utils.h"
 #include "ui_fonts.h"
 #include "ui_icons.h"
+#include "player.h"
 #include "module_common.h"
 
 // Format duration as MM:SS
@@ -921,5 +922,20 @@ void render_toast(SDL_Surface* screen, const char* message, uint32_t toast_time)
 // Clear toast from GPU layer
 void clear_toast(void) {
     PLAT_clearLayers(LAYER_TOAST);
+}
+
+void render_list_icon(SDL_Surface* screen, int x, int y, int size,
+                      SDL_Surface* artwork, AudioFormat format, bool selected) {
+    if (artwork) {
+        SDL_Rect dst = {x, y, size, size};
+        SDL_BlitScaled(artwork, NULL, screen, &dst);
+        return;
+    }
+    if (!Icons_isLoaded()) return;
+    SDL_Surface* icon = Icons_getForFormat(format, selected);
+    if (!icon) return;
+    SDL_Rect src = {0, 0, icon->w, icon->h};
+    SDL_Rect dst = {x, y, size, size};
+    SDL_BlitScaled(icon, &src, screen, &dst);
 }
 

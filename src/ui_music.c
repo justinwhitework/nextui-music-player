@@ -11,6 +11,7 @@
 #include "spectrum.h"
 #include "lyrics.h"
 #include "settings.h"
+#include "track_art.h"
 
 // Scroll text state for browser list (selected item)
 static ScrollTextState browser_scroll = {0};
@@ -92,24 +93,35 @@ void render_browser(SDL_Surface* screen, int show_setting, BrowserContext* brows
 
         // Render icon if available
         if (Icons_isLoaded()) {
-            SDL_Surface* icon = NULL;
+            int icon_y = y + (layout.item_h - icon_size) / 2;
+            int icon_x = pos.text_x;
+            SDL_Surface* artwork = NULL;
+
             if (entry->is_dir) {
-                icon = Icons_getFolder(selected);
+                SDL_Surface* icon = Icons_getFolder(selected);
+                if (icon) {
+                    SDL_Rect src_rect = {0, 0, icon->w, icon->h};
+                    SDL_Rect dst_rect = {icon_x, icon_y, icon_size, icon_size};
+                    SDL_BlitScaled(icon, &src_rect, screen, &dst_rect);
+                }
             } else if (entry->is_play_all) {
-                icon = Icons_getPlayAll(selected);
+                SDL_Surface* icon = Icons_getPlayAll(selected);
+                if (icon) {
+                    SDL_Rect src_rect = {0, 0, icon->w, icon->h};
+                    SDL_Rect dst_rect = {icon_x, icon_y, icon_size, icon_size};
+                    SDL_BlitScaled(icon, &src_rect, screen, &dst_rect);
+                }
+            } else if (Settings_getTooltipArtwork()) {
+                TrackArt_request(entry->path);
+                artwork = TrackArt_getThumbnail(entry->path, icon_size);
+                render_list_icon(screen, icon_x, icon_y, icon_size, artwork, entry->format, selected);
             } else {
-                icon = Icons_getForFormat(entry->format, selected);
-            }
-
-            if (icon) {
-                // Center icon vertically within the item
-                int icon_y = y + (layout.item_h - icon_size) / 2;
-                int icon_x = pos.text_x;
-
-                // Scale and blit the icon
-                SDL_Rect src_rect = {0, 0, icon->w, icon->h};
-                SDL_Rect dst_rect = {icon_x, icon_y, icon_size, icon_size};
-                SDL_BlitScaled(icon, &src_rect, screen, &dst_rect);
+                SDL_Surface* icon = Icons_getForFormat(entry->format, selected);
+                if (icon) {
+                    SDL_Rect src_rect = {0, 0, icon->w, icon->h};
+                    SDL_Rect dst_rect = {icon_x, icon_y, icon_size, icon_size};
+                    SDL_BlitScaled(icon, &src_rect, screen, &dst_rect);
+                }
             }
         }
 

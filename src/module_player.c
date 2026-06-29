@@ -15,6 +15,7 @@
 #include "playlist.h"
 #include "ui_music.h"
 #include "ui_album_art.h"
+#include "track_art.h"
 #include "ui_main.h"
 #include "lyrics.h"
 #include "settings.h"
@@ -368,6 +369,11 @@ static bool handle_browser_input(PlayerInternalState *state, int *dirty) {
         browser_animate_scroll();
     }
     if (browser_scroll_needs_render()) *dirty = 1;
+
+    if (Settings_getTooltipArtwork()) {
+        TrackArt_tick();
+        if (TrackArt_hasPendingWork()) *dirty = 1;
+    }
 
     return false;
 }

@@ -7,6 +7,10 @@
 #include "ui_fonts.h"
 #include "ui_icons.h"
 #include "ui_utils.h"
+#include "ui_album_art.h"
+#include "playlist_art.h"
+#include "track_art.h"
+#include "settings.h"
 #include "module_common.h"
 
 static ScrollTextState playlist_scroll = {0};
@@ -27,6 +31,7 @@ void render_playlist_list(SDL_Surface* screen, int show_setting,
     }
 
     ListLayout layout = calc_list_layout(screen);
+    bool tooltip = Settings_getTooltipArtwork();
     int icon_size = Icons_isLoaded() ? SCALE1(24) : 0;
     int icon_spacing = Icons_isLoaded() ? SCALE1(6) : 0;
     int icon_offset = icon_size + icon_spacing;
@@ -48,23 +53,33 @@ void render_playlist_list(SDL_Surface* screen, int show_setting,
             snprintf(display, sizeof(display), "%s (%d)", pl->name, pl->track_count);
         }
 
-        ListItemPos pos = render_list_item_pill(screen, &layout, display, truncated, y, is_selected, icon_offset);
+        bool use_icon_slot = Icons_isLoaded() && (pl->is_folder || tooltip);
+        int row_icon_offset = use_icon_slot ? icon_offset : 0;
 
-        if (Icons_isLoaded()) {
-            SDL_Surface* icon = pl->is_folder
-                ? Icons_getFolder(is_selected)
-                : NULL;
-            if (icon) {
-                int icon_y = y + (layout.item_h - icon_size) / 2;
-                SDL_Rect src_rect = {0, 0, icon->w, icon->h};
-                SDL_Rect dst_rect = {pos.text_x, icon_y, icon_size, icon_size};
-                SDL_BlitScaled(icon, &src_rect, screen, &dst_rect);
+        ListItemPos pos = render_list_item_pill(screen, &layout, display, truncated, y, is_selected, row_icon_offset);
+
+        if (use_icon_slot) {
+            int icon_y = y + (layout.item_h - icon_size) / 2;
+            int icon_x = pos.text_x;
+            if (pl->is_folder) {
+                SDL_Surface* icon = Icons_getFolder(is_selected);
+                if (icon) {
+                    SDL_Rect src_rect = {0, 0, icon->w, icon->h};
+                    SDL_Rect dst_rect = {icon_x, icon_y, icon_size, icon_size};
+                    SDL_BlitScaled(icon, &src_rect, screen, &dst_rect);
+                }
+            } else if (tooltip) {
+                SDL_Surface* thumb = PlaylistArt_getThumbnail(pl->path, icon_size);
+                if (thumb) {
+                    SDL_Rect dst = {icon_x, icon_y, icon_size, icon_size};
+                    SDL_BlitScaled(thumb, NULL, screen, &dst);
+                }
             }
         }
 
-        int text_x = pos.text_x + (pl->is_folder && Icons_isLoaded() ? icon_offset : 0);
+        int text_x = pos.text_x + (use_icon_slot ? icon_offset : 0);
         int available_width = pos.pill_width - SCALE1(BUTTON_PADDING * 2);
-        if (pl->is_folder && Icons_isLoaded()) {
+        if (use_icon_slot) {
             available_width -= icon_offset;
         }
         render_list_item_text(screen, &playlist_scroll, display, Fonts_getMedium(),
@@ -79,9 +94,17 @@ void render_playlist_list(SDL_Surface* screen, int show_setting,
 
 void render_playlist_detail(SDL_Surface* screen, int show_setting,
                             const char* playlist_name,
+                            const char* playlist_m3u_path,
                             PlaylistTrack* tracks, int count,
                             int selected, int scroll) {
     GFX_clear(screen);
+
+    if (Settings_getPlaylistBgArtwork() && playlist_m3u_path && playlist_m3u_path[0]) {
+        SDL_Surface* bg_art = PlaylistArt_get(playlist_m3u_path);
+        if (bg_art && bg_art->w > 0 && bg_art->h > 0) {
+            render_album_art_background(screen, bg_art);
+        }
+    }
 
     char truncated[256];
 
@@ -95,6 +118,7 @@ void render_playlist_detail(SDL_Surface* screen, int show_setting,
     }
 
     ListLayout layout = calc_list_layout(screen);
+    bool tooltip = Settings_getTooltipArtwork();
 
     int icon_size = Icons_isLoaded() ? SCALE1(24) : 0;
     int icon_spacing = Icons_isLoaded() ? SCALE1(6) : 0;
@@ -112,13 +136,14 @@ void render_playlist_detail(SDL_Surface* screen, int show_setting,
         ListItemPos pos = render_list_item_pill(screen, &layout, display, truncated, y, is_selected, icon_offset);
 
         if (Icons_isLoaded()) {
-            SDL_Surface* icon = Icons_getForFormat(tracks[idx].format, is_selected);
-            if (icon) {
-                int icon_y = y + (layout.item_h - icon_size) / 2;
-                SDL_Rect src_rect = {0, 0, icon->w, icon->h};
-                SDL_Rect dst_rect = {pos.text_x, icon_y, icon_size, icon_size};
-                SDL_BlitScaled(icon, &src_rect, screen, &dst_rect);
+            int icon_y = y + (layout.item_h - icon_size) / 2;
+            int icon_x = pos.text_x;
+            SDL_Surface* artwork = NULL;
+            if (tooltip) {
+                TrackArt_request(track->path);
+                artwork = TrackArt_getThumbnail(track->path, icon_size);
             }
+            render_list_icon(screen, icon_x, icon_y, icon_size, artwork, tracks[idx].format, is_selected);
         }
 
         int text_x = pos.text_x + icon_offset;
