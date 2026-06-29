@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "defines.h"
+#include "playlist_m3u.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +31,14 @@ static struct {
     bool lyrics_enabled;     // true = show lyrics
     int bass_filter_hz;      // 0=off, 80, 100, 120, 150, 200
     int soft_limiter_index;  // 0=off, 1=mild, 2=medium, 3=strong
+    int max_playlists;       // max playlists to scan/list
 } current_settings;
+
+static int clamp_max_playlists(int value) {
+    if (value < 1) return 1;
+    if (value > MAX_PLAYLISTS_CAP) return MAX_PLAYLISTS_CAP;
+    return value;
+}
 
 // Find index of current screen off value in the values array
 static int get_screen_off_index(void) {
@@ -58,6 +66,7 @@ void Settings_init(void) {
     current_settings.lyrics_enabled = true;
     current_settings.bass_filter_hz = bass_filter_values[DEFAULT_BASS_FILTER_INDEX];
     current_settings.soft_limiter_index = DEFAULT_SOFT_LIMITER_INDEX;
+    current_settings.max_playlists = DEFAULT_MAX_PLAYLISTS;
 
     // Try to load from file
     FILE* f = fopen(SETTINGS_FILE, "r");
@@ -90,6 +99,9 @@ void Settings_init(void) {
             if (value >= 0 && value < SOFT_LIMITER_VALUE_COUNT) {
                 current_settings.soft_limiter_index = value;
             }
+        }
+        if (sscanf(line, "max_playlists=%d", &value) == 1) {
+            current_settings.max_playlists = clamp_max_playlists(value);
         }
     }
     fclose(f);
@@ -152,7 +164,12 @@ void Settings_save(void) {
     fprintf(f, "lyrics_enabled=%d\n", current_settings.lyrics_enabled ? 1 : 0);
     fprintf(f, "bass_filter_hz=%d\n", current_settings.bass_filter_hz);
     fprintf(f, "soft_limiter=%d\n", current_settings.soft_limiter_index);
+    fprintf(f, "max_playlists=%d\n", current_settings.max_playlists);
     fclose(f);
+}
+
+int Settings_getMaxPlaylists(void) {
+    return current_settings.max_playlists;
 }
 
 bool Settings_getLyricsEnabled(void) {

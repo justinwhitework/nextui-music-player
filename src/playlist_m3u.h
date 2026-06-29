@@ -5,7 +5,8 @@
 #include "playlist.h"  // For PlaylistTrack
 
 #define PLAYLISTS_DIR  SHARED_USERDATA_PATH "/music-player/playlists"
-#define MAX_PLAYLISTS  50
+#define MAX_PLAYLISTS_CAP 16384
+#define DEFAULT_MAX_PLAYLISTS 50
 #define MAX_PLAYLIST_NAME 128
 
 typedef struct {
