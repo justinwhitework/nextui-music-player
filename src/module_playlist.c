@@ -14,6 +14,8 @@
 #include "ui_playlist.h"
 #include "ui_main.h"
 #include "ui_utils.h"
+#include "ui_album_art.h"
+#include "track_art.h"
 #include "settings.h"
 
 typedef enum {
@@ -253,6 +255,7 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
 
             if (PAD_justPressed(BTN_B)) {
                 GFX_clearLayers(LAYER_SCROLLTEXT);
+                cleanup_album_art_background();
                 refresh_playlists();
                 state = PLAYLIST_INTERNAL_LIST;
                 dirty = 1;
@@ -300,6 +303,11 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
                 playlist_list_animate_scroll();
             }
             if (playlist_list_scroll_needs_render()) dirty = 1;
+
+            if (Settings_getTooltipArtwork()) {
+                TrackArt_tick();
+                if (TrackArt_hasPendingWork()) dirty = 1;
+            }
         }
 
         ModuleCommon_PWR_update(&dirty, &show_setting);
@@ -308,6 +316,7 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
             if (state == PLAYLIST_INTERNAL_DETAIL &&
                 (current_playlist_index < 0 || current_playlist_index >= playlist_count ||
                  playlists[current_playlist_index].is_folder)) {
+                cleanup_album_art_background();
                 state = PLAYLIST_INTERNAL_LIST;
             }
 
@@ -322,6 +331,7 @@ ModuleExitReason PlaylistModule_run(SDL_Surface* screen) {
                 int items_per_page = calc_list_layout(screen).items_per_page;
                 adjust_list_scroll(detail_selected, &detail_scroll, items_per_page);
                 render_playlist_detail(screen, show_setting, playlists[current_playlist_index].name,
+                                       playlists[current_playlist_index].path,
                                        detail_tracks, detail_track_count, detail_selected, detail_scroll);
             }
 

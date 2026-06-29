@@ -11,6 +11,9 @@
 #include "ui_system.h"
 #include "wifi.h"
 #include "album_art.h"
+#include "playlist_art.h"
+#include "track_art.h"
+#include "ui_album_art.h"
 
 // Internal states
 typedef enum {
@@ -25,10 +28,12 @@ typedef enum {
 #define SETTINGS_ITEM_SCREEN_OFF    0
 #define SETTINGS_ITEM_BASS_FILTER   1
 #define SETTINGS_ITEM_SOFT_LIMITER  2
-#define SETTINGS_ITEM_CLEAR_CACHE   3
-#define SETTINGS_ITEM_UPDATE_YTDLP  4
-#define SETTINGS_ITEM_ABOUT         5
-#define SETTINGS_ITEM_COUNT         6
+#define SETTINGS_ITEM_PLAYLIST_BG_ART 3
+#define SETTINGS_ITEM_TOOLTIP_ART   4
+#define SETTINGS_ITEM_CLEAR_CACHE   5
+#define SETTINGS_ITEM_UPDATE_YTDLP  6
+#define SETTINGS_ITEM_ABOUT         7
+#define SETTINGS_ITEM_COUNT         8
 
 // Internal app state constants for controls help
 // These match the pattern used in ui_main.c
@@ -81,6 +86,12 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                     } else if (menu_selected == SETTINGS_ITEM_SOFT_LIMITER) {
                         Settings_cycleSoftLimiterPrev();
                         dirty = 1;
+                    } else if (menu_selected == SETTINGS_ITEM_PLAYLIST_BG_ART) {
+                        Settings_togglePlaylistBgArtwork();
+                        dirty = 1;
+                    } else if (menu_selected == SETTINGS_ITEM_TOOLTIP_ART) {
+                        Settings_toggleTooltipArtwork();
+                        dirty = 1;
                     } else {
                         int items_per_page = calc_list_layout(screen).items_per_page;
                         list_page_up(&menu_selected, &menu_scroll, SETTINGS_ITEM_COUNT, items_per_page);
@@ -96,6 +107,12 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                         dirty = 1;
                     } else if (menu_selected == SETTINGS_ITEM_SOFT_LIMITER) {
                         Settings_cycleSoftLimiterNext();
+                        dirty = 1;
+                    } else if (menu_selected == SETTINGS_ITEM_PLAYLIST_BG_ART) {
+                        Settings_togglePlaylistBgArtwork();
+                        dirty = 1;
+                    } else if (menu_selected == SETTINGS_ITEM_TOOLTIP_ART) {
+                        Settings_toggleTooltipArtwork();
                         dirty = 1;
                     } else {
                         int items_per_page = calc_list_layout(screen).items_per_page;
@@ -117,6 +134,14 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                             break;
                         case SETTINGS_ITEM_SOFT_LIMITER:
                             Settings_cycleSoftLimiterNext();
+                            dirty = 1;
+                            break;
+                        case SETTINGS_ITEM_PLAYLIST_BG_ART:
+                            Settings_togglePlaylistBgArtwork();
+                            dirty = 1;
+                            break;
+                        case SETTINGS_ITEM_TOOLTIP_ART:
+                            Settings_toggleTooltipArtwork();
                             dirty = 1;
                             break;
                         case SETTINGS_ITEM_CLEAR_CACHE:
@@ -146,6 +171,9 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                 if (PAD_justPressed(BTN_A)) {
                     // Confirm - clear the cache
                     album_art_clear_disk_cache();
+                    PlaylistArt_clearCache();
+                    TrackArt_clearCache();
+                    cleanup_album_art_background();
                     state = SETTINGS_STATE_MENU;
                     dirty = 1;
                 }

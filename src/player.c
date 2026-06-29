@@ -50,7 +50,6 @@ struct input_event_raw {
 #include "audio/stb_vorbis.h"
 
 // For M4A/AAC we use minimp4 for demuxing and FDK-AAC for decoding
-#define MINIMP4_IMPLEMENTATION
 #include "audio/minimp4.h"
 #include <fdk-aac/aacdecoder_lib.h>
 #include <opusfile.h>

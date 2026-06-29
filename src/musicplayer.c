@@ -33,6 +33,8 @@
 #include "resume.h"
 #include "background.h"
 #include "display_helper.h"
+#include "playlist_art.h"
+#include "track_art.h"
 
 // Global quit flag
 static bool quit = false;
@@ -123,6 +125,8 @@ int main(int argc, char* argv[]) {
 
     // Initialize app-specific settings
     Settings_init();
+    PlaylistArt_init();
+    TrackArt_init();
 
     // Initialize resume state
     Resume_init();
@@ -197,6 +201,8 @@ int main(int argc, char* argv[]) {
 cleanup:
     Background_stopAll();
     Downloader_cleanup();
+    TrackArt_cleanup();
+    PlaylistArt_cleanup();
     Settings_quit();
     ModuleCommon_quit();
     SelfUpdate_cleanup();

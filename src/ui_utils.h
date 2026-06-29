@@ -265,4 +265,8 @@ DialogBox render_dialog_box(SDL_Surface* screen, int box_w, int box_h);
 void render_empty_state(SDL_Surface* screen, const char* message,
                         const char* subtitle, const char* y_button_label);
 
+// Blit list-row artwork or fall back to format icon at the same slot
+void render_list_icon(SDL_Surface* screen, int x, int y, int size,
+                      SDL_Surface* artwork, AudioFormat format, bool selected);
+
 #endif

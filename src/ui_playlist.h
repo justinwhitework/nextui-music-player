@@ -12,6 +12,7 @@ void render_playlist_list(SDL_Surface* screen, int show_setting,
 
 void render_playlist_detail(SDL_Surface* screen, int show_setting,
                             const char* playlist_name,
+                            const char* playlist_m3u_path,
                             PlaylistTrack* tracks, int count,
                             int selected, int scroll);
 
