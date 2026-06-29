@@ -7,6 +7,7 @@
 
 // Settings file path (in shared userdata directory)
 #define SETTINGS_FILE SHARED_USERDATA_PATH "/music-player/settings.cfg"
+#define OVERRIDES_FILE SHARED_USERDATA_PATH "/music-player/overrides.cfg"
 #define SETTINGS_DIR SHARED_USERDATA_PATH "/music-player"
 
 // Valid screen off timeout values (in seconds)
@@ -40,6 +41,48 @@ static int clamp_max_playlists(int value) {
     return value;
 }
 
+static void apply_config_line(const char* line) {
+    int value;
+    if (sscanf(line, "screen_off_timeout=%d", &value) == 1) {
+        for (int i = 0; i < SCREEN_OFF_VALUE_COUNT; i++) {
+            if (screen_off_values[i] == value) {
+                current_settings.screen_off_timeout = value;
+                break;
+            }
+        }
+    }
+    if (sscanf(line, "lyrics_enabled=%d", &value) == 1) {
+        current_settings.lyrics_enabled = (value != 0);
+    }
+    if (sscanf(line, "bass_filter_hz=%d", &value) == 1) {
+        for (int i = 0; i < BASS_FILTER_VALUE_COUNT; i++) {
+            if (bass_filter_values[i] == value) {
+                current_settings.bass_filter_hz = value;
+                break;
+            }
+        }
+    }
+    if (sscanf(line, "soft_limiter=%d", &value) == 1) {
+        if (value >= 0 && value < SOFT_LIMITER_VALUE_COUNT) {
+            current_settings.soft_limiter_index = value;
+        }
+    }
+    if (sscanf(line, "max_playlists=%d", &value) == 1) {
+        current_settings.max_playlists = clamp_max_playlists(value);
+    }
+}
+
+static void load_config_file(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        apply_config_line(line);
+    }
+    fclose(f);
+}
+
 // Find index of current screen off value in the values array
 static int get_screen_off_index(void) {
     for (int i = 0; i < SCREEN_OFF_VALUE_COUNT; i++) {
@@ -68,43 +111,9 @@ void Settings_init(void) {
     current_settings.soft_limiter_index = DEFAULT_SOFT_LIMITER_INDEX;
     current_settings.max_playlists = DEFAULT_MAX_PLAYLISTS;
 
-    // Try to load from file
-    FILE* f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
-
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        int value;
-        if (sscanf(line, "screen_off_timeout=%d", &value) == 1) {
-            // Validate the value
-            for (int i = 0; i < SCREEN_OFF_VALUE_COUNT; i++) {
-                if (screen_off_values[i] == value) {
-                    current_settings.screen_off_timeout = value;
-                    break;
-                }
-            }
-        }
-        if (sscanf(line, "lyrics_enabled=%d", &value) == 1) {
-            current_settings.lyrics_enabled = (value != 0);
-        }
-        if (sscanf(line, "bass_filter_hz=%d", &value) == 1) {
-            for (int i = 0; i < BASS_FILTER_VALUE_COUNT; i++) {
-                if (bass_filter_values[i] == value) {
-                    current_settings.bass_filter_hz = value;
-                    break;
-                }
-            }
-        }
-        if (sscanf(line, "soft_limiter=%d", &value) == 1) {
-            if (value >= 0 && value < SOFT_LIMITER_VALUE_COUNT) {
-                current_settings.soft_limiter_index = value;
-            }
-        }
-        if (sscanf(line, "max_playlists=%d", &value) == 1) {
-            current_settings.max_playlists = clamp_max_playlists(value);
-        }
-    }
-    fclose(f);
+    // Load in-app settings, then user overrides (overrides win on conflict)
+    load_config_file(SETTINGS_FILE);
+    load_config_file(OVERRIDES_FILE);
 }
 
 void Settings_quit(void) {
@@ -164,7 +173,6 @@ void Settings_save(void) {
     fprintf(f, "lyrics_enabled=%d\n", current_settings.lyrics_enabled ? 1 : 0);
     fprintf(f, "bass_filter_hz=%d\n", current_settings.bass_filter_hz);
     fprintf(f, "soft_limiter=%d\n", current_settings.soft_limiter_index);
-    fprintf(f, "max_playlists=%d\n", current_settings.max_playlists);
     fclose(f);
 }
 
