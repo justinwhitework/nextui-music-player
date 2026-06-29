@@ -1,38 +1,92 @@
 #include "settings.h"
 #include "defines.h"
+#include "playlist_m3u.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Settings file path (in shared userdata directory)
 #define SETTINGS_FILE SHARED_USERDATA_PATH "/music-player/settings.cfg"
+#define OVERRIDES_FILE SHARED_USERDATA_PATH "/music-player/overrides.cfg"
 #define SETTINGS_DIR SHARED_USERDATA_PATH "/music-player"
 
-// Valid screen off timeout values (in seconds)
-// 0 means off (no auto screen off)
 static const int screen_off_values[] = {60, 90, 120, 0};
 #define SCREEN_OFF_VALUE_COUNT 4
-#define DEFAULT_SCREEN_OFF_INDEX 0  // Default to 60s
+#define DEFAULT_SCREEN_OFF_INDEX 0
 
-// Bass filter (high-pass cutoff Hz, 0 = off)
 static const int bass_filter_values[] = {0, 80, 100, 120, 150, 200};
 #define BASS_FILTER_VALUE_COUNT 6
-#define DEFAULT_BASS_FILTER_INDEX 3  // 120 Hz
+#define DEFAULT_BASS_FILTER_INDEX 3
 
-// Soft limiter (0=off, 1=mild, 2=medium, 3=strong)
 static const float soft_limiter_thresholds[] = {0.0f, 0.7f, 0.6f, 0.5f};
 #define SOFT_LIMITER_VALUE_COUNT 4
-#define DEFAULT_SOFT_LIMITER_INDEX 2  // Medium (0.6)
+#define DEFAULT_SOFT_LIMITER_INDEX 2
 
-// Current settings
 static struct {
-    int screen_off_timeout;  // seconds, 0 = off
-    bool lyrics_enabled;     // true = show lyrics
-    int bass_filter_hz;      // 0=off, 80, 100, 120, 150, 200
-    int soft_limiter_index;  // 0=off, 1=mild, 2=medium, 3=strong
+    int screen_off_timeout;
+    bool lyrics_enabled;
+    int bass_filter_hz;
+    int soft_limiter_index;
+    int max_playlists;
+    int playlist_scan_depth;
 } current_settings;
 
-// Find index of current screen off value in the values array
+static int clamp_max_playlists(int value) {
+    if (value < 1) return 1;
+    if (value > MAX_PLAYLISTS_CAP) return MAX_PLAYLISTS_CAP;
+    return value;
+}
+
+static int clamp_playlist_scan_depth(int value) {
+    if (value < 1) return 1;
+    if (value > MAX_PLAYLIST_SCAN_DEPTH_CAP) return MAX_PLAYLIST_SCAN_DEPTH_CAP;
+    return value;
+}
+
+static void apply_config_line(const char* line) {
+    int value;
+    if (sscanf(line, "screen_off_timeout=%d", &value) == 1) {
+        for (int i = 0; i < SCREEN_OFF_VALUE_COUNT; i++) {
+            if (screen_off_values[i] == value) {
+                current_settings.screen_off_timeout = value;
+                break;
+            }
+        }
+    }
+    if (sscanf(line, "lyrics_enabled=%d", &value) == 1) {
+        current_settings.lyrics_enabled = (value != 0);
+    }
+    if (sscanf(line, "bass_filter_hz=%d", &value) == 1) {
+        for (int i = 0; i < BASS_FILTER_VALUE_COUNT; i++) {
+            if (bass_filter_values[i] == value) {
+                current_settings.bass_filter_hz = value;
+                break;
+            }
+        }
+    }
+    if (sscanf(line, "soft_limiter=%d", &value) == 1) {
+        if (value >= 0 && value < SOFT_LIMITER_VALUE_COUNT) {
+            current_settings.soft_limiter_index = value;
+        }
+    }
+    if (sscanf(line, "max_playlists=%d", &value) == 1) {
+        current_settings.max_playlists = clamp_max_playlists(value);
+    }
+    if (sscanf(line, "playlist_scan_depth=%d", &value) == 1) {
+        current_settings.playlist_scan_depth = clamp_playlist_scan_depth(value);
+    }
+}
+
+static void load_config_file(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        apply_config_line(line);
+    }
+    fclose(f);
+}
+
 static int get_screen_off_index(void) {
     for (int i = 0; i < SCREEN_OFF_VALUE_COUNT; i++) {
         if (screen_off_values[i] == current_settings.screen_off_timeout) {
@@ -42,7 +96,6 @@ static int get_screen_off_index(void) {
     return DEFAULT_SCREEN_OFF_INDEX;
 }
 
-// Find index of current bass filter value
 static int get_bass_filter_index(void) {
     for (int i = 0; i < BASS_FILTER_VALUE_COUNT; i++) {
         if (bass_filter_values[i] == current_settings.bass_filter_hz) {
@@ -53,46 +106,15 @@ static int get_bass_filter_index(void) {
 }
 
 void Settings_init(void) {
-    // Set defaults
     current_settings.screen_off_timeout = screen_off_values[DEFAULT_SCREEN_OFF_INDEX];
     current_settings.lyrics_enabled = true;
     current_settings.bass_filter_hz = bass_filter_values[DEFAULT_BASS_FILTER_INDEX];
     current_settings.soft_limiter_index = DEFAULT_SOFT_LIMITER_INDEX;
+    current_settings.max_playlists = DEFAULT_MAX_PLAYLISTS;
+    current_settings.playlist_scan_depth = DEFAULT_PLAYLIST_SCAN_DEPTH;
 
-    // Try to load from file
-    FILE* f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
-
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        int value;
-        if (sscanf(line, "screen_off_timeout=%d", &value) == 1) {
-            // Validate the value
-            for (int i = 0; i < SCREEN_OFF_VALUE_COUNT; i++) {
-                if (screen_off_values[i] == value) {
-                    current_settings.screen_off_timeout = value;
-                    break;
-                }
-            }
-        }
-        if (sscanf(line, "lyrics_enabled=%d", &value) == 1) {
-            current_settings.lyrics_enabled = (value != 0);
-        }
-        if (sscanf(line, "bass_filter_hz=%d", &value) == 1) {
-            for (int i = 0; i < BASS_FILTER_VALUE_COUNT; i++) {
-                if (bass_filter_values[i] == value) {
-                    current_settings.bass_filter_hz = value;
-                    break;
-                }
-            }
-        }
-        if (sscanf(line, "soft_limiter=%d", &value) == 1) {
-            if (value >= 0 && value < SOFT_LIMITER_VALUE_COUNT) {
-                current_settings.soft_limiter_index = value;
-            }
-        }
-    }
-    fclose(f);
+    load_config_file(SETTINGS_FILE);
+    load_config_file(OVERRIDES_FILE);
 }
 
 void Settings_quit(void) {
@@ -104,7 +126,6 @@ int Settings_getScreenOffTimeout(void) {
 }
 
 void Settings_setScreenOffTimeout(int seconds) {
-    // Validate the value
     for (int i = 0; i < SCREEN_OFF_VALUE_COUNT; i++) {
         if (screen_off_values[i] == seconds) {
             current_settings.screen_off_timeout = seconds;
@@ -112,7 +133,6 @@ void Settings_setScreenOffTimeout(int seconds) {
             return;
         }
     }
-    // Invalid value, ignore
 }
 
 void Settings_cycleScreenOffNext(void) {
@@ -140,7 +160,6 @@ const char* Settings_getScreenOffDisplayStr(void) {
 }
 
 void Settings_save(void) {
-    // Ensure directory exists
     char mkdir_cmd[512];
     snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", SETTINGS_DIR);
     system(mkdir_cmd);
@@ -153,6 +172,14 @@ void Settings_save(void) {
     fprintf(f, "bass_filter_hz=%d\n", current_settings.bass_filter_hz);
     fprintf(f, "soft_limiter=%d\n", current_settings.soft_limiter_index);
     fclose(f);
+}
+
+int Settings_getMaxPlaylists(void) {
+    return current_settings.max_playlists;
+}
+
+int Settings_getPlaylistScanDepth(void) {
+    return current_settings.playlist_scan_depth;
 }
 
 bool Settings_getLyricsEnabled(void) {
@@ -169,7 +196,6 @@ void Settings_toggleLyrics(void) {
     Settings_save();
 }
 
-// Bass filter getters/cyclers
 int Settings_getBassFilterHz(void) {
     return current_settings.bass_filter_hz;
 }
@@ -195,7 +221,6 @@ const char* Settings_getBassFilterDisplayStr(void) {
     return buf;
 }
 
-// Soft limiter getters/cyclers
 int Settings_getSoftLimiter(void) {
     return current_settings.soft_limiter_index;
 }

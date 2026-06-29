@@ -43,6 +43,10 @@ void Settings_cycleSoftLimiterNext(void);
 void Settings_cycleSoftLimiterPrev(void);
 const char* Settings_getSoftLimiterDisplayStr(void);
 
+// Power-user overrides (read from overrides.cfg only)
+int Settings_getMaxPlaylists(void);
+int Settings_getPlaylistScanDepth(void);
+
 // Save settings to file (auto-called on change)
 void Settings_save(void);
 
