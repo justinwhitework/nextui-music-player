@@ -27,6 +27,7 @@ jobs:
       - name: Build for tg5040
         run: |
           docker run --rm \
+            -u "$(id -u):$(id -g)" \
             -v ${{ github.workspace }}/NextUI/workspace:/root/workspace \
             ghcr.io/loveretro/tg5040-toolchain:latest \
             /bin/bash -c 'source ~/.bashrc && cd /root/workspace/tg5040/libmsettings && make build CROSS_COMPILE=aarch64-nextui-linux-gnu- PREFIX=/opt/nextui PREFIX_LOCAL=/opt/nextui && cd /root/workspace/nextui-music-player/src && make PLATFORM=tg5040'
@@ -34,6 +35,7 @@ jobs:
       - name: Package release zip
         run: |
           cd ${{ github.workspace }}/NextUI/workspace/nextui-music-player
+          sudo chown -R "$(id -u):$(id -g)" .
           rm -rf .github src .git .gitignore LICENSE README.md
           zip -r ../Music.Player.pak.zip .
 
