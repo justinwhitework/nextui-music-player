@@ -14,7 +14,6 @@
 #include "display_helper.h"
 #include "settings.h"
 
-// Internal state
 static bool active = false;
 
 static char** file_paths = NULL;
@@ -25,13 +24,9 @@ static int playlist_count = 0;
 static int selected = 0;
 static int scroll = 0;
 
-// Toast state (shown after adding)
 static char toast_msg[128] = "";
 static uint32_t toast_time = 0;
 
-// Extract display name from a file path: basename without extension
-// TODO: prefer the track name from file metadata (ID3 / Vorbis comment / etc.)
-// over the filename when available; fall back to this only when metadata is missing.
 static void display_name_from_path(const char* path, char* out, int out_size) {
     const char* base = strrchr(path, '/');
     base = base ? base + 1 : path;
@@ -58,7 +53,8 @@ static void refresh_playlists(void) {
         playlist_count = 0;
         return;
     }
-    playlist_count = M3U_listPlaylists(playlists, limit);
+    playlist_count = M3U_listPlaylistsForPicker(
+        playlists, limit, Settings_getPlaylistScanDepth());
 }
 
 void AddToPlaylist_open(const char* path, const char* display_name) {
@@ -71,7 +67,7 @@ void AddToPlaylist_open(const char* path, const char* display_name) {
     if (!file_paths[0]) { free(file_paths); file_paths = NULL; return; }
     file_count = 1;
 
-    (void)display_name;  // unused — display name always derived from path at add time
+    (void)display_name;
 
     M3U_init();
     refresh_playlists();
@@ -85,7 +81,7 @@ void AddToPlaylist_openDir(const char* dir_path) {
     free_file_list();
 
     file_count = Playlist_collectPaths(dir_path, &file_paths, 1000);
-    if (file_count == 0) return;  // no audio files — no-op
+    if (file_count == 0) return;
 
     M3U_init();
     refresh_playlists();
@@ -103,11 +99,15 @@ int AddToPlaylist_handleInput(void) {
 
     if (PAD_justPressed(BTN_B)) {
         free_file_list();
+        if (playlists) {
+            free(playlists);
+            playlists = NULL;
+        }
         active = false;
         return 1;
     }
 
-    int total_items = playlist_count + 1;  // +1 for "New Playlist"
+    int total_items = playlist_count + 1;
 
     if (PAD_justRepeated(BTN_UP)) {
         selected = (selected > 0) ? selected - 1 : total_items - 1;
@@ -117,7 +117,6 @@ int AddToPlaylist_handleInput(void) {
     }
     else if (PAD_justPressed(BTN_A)) {
         if (selected == 0) {
-            // New Playlist
             DisplayHelper_prepareForExternal();
             char* name = Keyboard_open("Playlist name");
             PAD_poll(); PAD_reset();
@@ -139,23 +138,32 @@ int AddToPlaylist_handleInput(void) {
                 free(name);
             }
             free_file_list();
+            if (playlists) {
+                free(playlists);
+                playlists = NULL;
+            }
             active = false;
             return 1;
         } else {
-            // Existing playlist
             int idx = selected - 1;
             if (idx >= 0 && idx < playlist_count) {
                 int added = 0;
                 char dname[256];
+                char picker_label[256];
                 for (int i = 0; i < file_count; i++) {
                     display_name_from_path(file_paths[i], dname, sizeof(dname));
                     if (M3U_addTrack(playlists[idx].path, file_paths[i], dname) == 0) added++;
                 }
-                snprintf(toast_msg, sizeof(toast_msg), "Added %d/%d files to %s",
-                         added, file_count, playlists[idx].name);
+                M3U_formatPickerLabel(&playlists[idx], picker_label, sizeof(picker_label));
+                snprintf(toast_msg, sizeof(toast_msg), "Added %d/%d to %s",
+                         added, file_count, picker_label);
                 toast_time = SDL_GetTicks();
             }
             free_file_list();
+            if (playlists) {
+                free(playlists);
+                playlists = NULL;
+            }
             active = false;
             return 1;
         }
@@ -174,7 +182,6 @@ void AddToPlaylist_render(SDL_Surface* screen) {
     int line_height = SCALE1(22);
     DialogBox db = render_dialog_box(screen, SCALE1(260), SCALE1(70) + (visible_items * line_height));
 
-    // Title with file count
     char title[64];
     snprintf(title, sizeof(title), "Add to Playlist: (%d %s)",
              file_count, file_count == 1 ? "file" : "files");
@@ -184,38 +191,33 @@ void AddToPlaylist_render(SDL_Surface* screen) {
         SDL_FreeSurface(title_surf);
     }
 
-    // Adjust scroll
     int items_per_page = visible_items;
     adjust_list_scroll(selected, &scroll, items_per_page);
 
-    // List items
     int y_offset = db.box_y + SCALE1(35);
     for (int i = 0; i < items_per_page && (scroll + i) < total_items; i++) {
         int idx = scroll + i;
         bool is_selected = (idx == selected);
 
         const char* label;
-        char buf[160];
+        char buf[256];
         if (idx == 0) {
             label = "+ New Playlist";
         } else {
-            PlaylistInfo* pl = &playlists[idx - 1];
-            snprintf(buf, sizeof(buf), "%s (%d)", pl->name, pl->track_count);
+            M3U_formatPickerLabel(&playlists[idx - 1], buf, sizeof(buf));
             label = buf;
         }
 
         SDL_Color color = is_selected ? COLOR_WHITE : COLOR_GRAY;
         TTF_Font* font = Fonts_getSmall();
 
-        // Selection indicator
         if (is_selected) {
             SDL_Rect sel_bg = {db.content_x - SCALE1(4), y_offset, db.content_w + SCALE1(8), line_height};
             render_rounded_rect_bg(screen, sel_bg.x, sel_bg.y, sel_bg.w, sel_bg.h,
                                    SDL_MapRGB(screen->format, 60, 60, 60));
         }
 
-        // Truncate text if needed
-        char truncated[160];
+        char truncated[256];
         GFX_truncateText(font, label, truncated, db.content_w, 0);
 
         SDL_Surface* text_surf = TTF_RenderUTF8_Blended(font, truncated, color);
@@ -227,7 +229,6 @@ void AddToPlaylist_render(SDL_Surface* screen) {
         y_offset += line_height;
     }
 
-    // Scroll indicators
     if (scroll > 0) {
         SDL_Surface* up = TTF_RenderUTF8_Blended(Fonts_getTiny(), "...", COLOR_GRAY);
         if (up) {
@@ -252,7 +253,6 @@ void AddToPlaylist_render(SDL_Surface* screen) {
     }
 }
 
-// Get toast message and time (for callers to display after dialog closes)
 const char* AddToPlaylist_getToastMessage(void) {
     return toast_msg;
 }

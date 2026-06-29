@@ -7,22 +7,46 @@
 #define PLAYLISTS_DIR  SHARED_USERDATA_PATH "/music-player/playlists"
 #define MAX_PLAYLISTS_CAP 16384
 #define DEFAULT_MAX_PLAYLISTS 50
+#define DEFAULT_PLAYLIST_SCAN_DEPTH 4
+#define MAX_PLAYLIST_SCAN_DEPTH_CAP 16
 #define MAX_PLAYLIST_NAME 128
 
 typedef struct {
     char name[MAX_PLAYLIST_NAME];  // Display name (without .m3u)
-    char path[512];                // Full path to .m3u file
-    int track_count;               // Number of tracks (from quick scan)
+    char path[512];                // Full path to .m3u file or folder
+    int track_count;               // Number of tracks (playlists only)
+    bool is_folder;                // true = subfolder entry
 } PlaylistInfo;
 
 // Create playlists directory if it doesn't exist
 void M3U_init(void);
 
-// Scan playlists directory, fill out array. Returns count.
-int M3U_listPlaylists(PlaylistInfo* out, int max);
+// List folders then playlists in a single directory (non-recursive).
+int M3U_listDirectory(const char* dir, PlaylistInfo* out, int max, int max_scan_depth);
 
-// Create an empty .m3u file with the given name. Returns 0 on success.
+// Recursively collect all playlists up to max_scan_depth folder nesting.
+int M3U_listAllPlaylists(PlaylistInfo* out, int max, int max_scan_depth);
+
+// For Add-to-Playlist: flat list, root playlists first, then nested by path.
+int M3U_listPlaylistsForPicker(PlaylistInfo* out, int max, int max_scan_depth);
+
+// Label for picker rows: "Name (n)" or "Folder / Name (n)".
+void M3U_formatPickerLabel(const PlaylistInfo* info, char* out, int out_size);
+
+// Depth of dir relative to PLAYLISTS_DIR (0 = root).
+int M3U_dirDepth(const char* dir);
+
+// True when dir is the playlists root.
+bool M3U_isPlaylistsRoot(const char* dir);
+
+// Parent of dir into out (PLAYLISTS_DIR if already at root). Returns 0 on success.
+int M3U_parentDirectory(const char* dir, char* out, int out_size);
+
+// Create an empty .m3u in PLAYLISTS_DIR. Returns 0 on success.
 int M3U_create(const char* name);
+
+// Create an empty .m3u in dir. Returns 0 on success.
+int M3U_createAt(const char* dir, const char* name);
 
 // Delete a playlist file. Returns 0 on success.
 int M3U_delete(const char* m3u_path);
