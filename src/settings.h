@@ -43,6 +43,10 @@ void Settings_cycleSoftLimiterNext(void);
 void Settings_cycleSoftLimiterPrev(void);
 const char* Settings_getSoftLimiterDisplayStr(void);
 
+// Max playlists to list in Library → Playlists (default 50, cap 16384).
+// Set in overrides.cfg only — the app never writes that file.
+int Settings_getMaxPlaylists(void);
+
 // Save settings to file (auto-called on change)
 void Settings_save(void);
 

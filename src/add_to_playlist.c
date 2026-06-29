@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "defines.h"
@@ -11,6 +12,7 @@
 #include "ui_utils.h"
 #include "module_common.h"
 #include "display_helper.h"
+#include "settings.h"
 
 // Internal state
 static bool active = false;
@@ -18,7 +20,7 @@ static bool active = false;
 static char** file_paths = NULL;
 static int    file_count  = 0;
 
-static PlaylistInfo playlists[MAX_PLAYLISTS];
+static PlaylistInfo* playlists = NULL;
 static int playlist_count = 0;
 static int selected = 0;
 static int scroll = 0;
@@ -44,6 +46,21 @@ static void free_file_list(void) {
     file_count  = 0;
 }
 
+static void refresh_playlists(void) {
+    if (playlists) {
+        free(playlists);
+        playlists = NULL;
+    }
+
+    int limit = Settings_getMaxPlaylists();
+    playlists = calloc(limit, sizeof(PlaylistInfo));
+    if (!playlists) {
+        playlist_count = 0;
+        return;
+    }
+    playlist_count = M3U_listPlaylists(playlists, limit);
+}
+
 void AddToPlaylist_open(const char* path, const char* display_name) {
     if (!path) return;
     free_file_list();
@@ -57,7 +74,7 @@ void AddToPlaylist_open(const char* path, const char* display_name) {
     (void)display_name;  // unused — display name always derived from path at add time
 
     M3U_init();
-    playlist_count = M3U_listPlaylists(playlists, MAX_PLAYLISTS);
+    refresh_playlists();
     selected = 0;
     scroll = 0;
     active = true;
@@ -71,7 +88,7 @@ void AddToPlaylist_openDir(const char* dir_path) {
     if (file_count == 0) return;  // no audio files — no-op
 
     M3U_init();
-    playlist_count = M3U_listPlaylists(playlists, MAX_PLAYLISTS);
+    refresh_playlists();
     selected = 0;
     scroll = 0;
     active = true;

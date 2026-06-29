@@ -14,6 +14,7 @@
 #include "ui_playlist.h"
 #include "ui_main.h"
 #include "ui_utils.h"
+#include "settings.h"
 
 // Internal states
 typedef enum {
@@ -22,7 +23,8 @@ typedef enum {
 } PlaylistInternalState;
 
 // List state
-static PlaylistInfo playlists[MAX_PLAYLISTS];
+static PlaylistInfo* playlists = NULL;
+static int playlist_capacity = 0;
 static int playlist_count = 0;
 static int list_selected = 0;
 static int list_scroll = 0;
@@ -49,7 +51,20 @@ static int confirm_target = -1;
 #define PLAYLIST_DETAIL_HELP_STATE 51
 
 static void refresh_playlists(void) {
-    playlist_count = M3U_listPlaylists(playlists, MAX_PLAYLISTS);
+    if (playlists) {
+        free(playlists);
+        playlists = NULL;
+        playlist_capacity = 0;
+    }
+
+    int limit = Settings_getMaxPlaylists();
+    playlists = calloc(limit, sizeof(PlaylistInfo));
+    if (!playlists) {
+        playlist_count = 0;
+        return;
+    }
+    playlist_capacity = limit;
+    playlist_count = M3U_listPlaylists(playlists, limit);
 }
 
 static void refresh_detail(void) {

@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag for manual runs (e.g. v0.0.1-test)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -27,30 +32,56 @@ jobs:
       - name: Build for tg5040
         run: |
           docker run --rm \
-            -v ${{ github.workspace }}/NextUI/workspace:/root/workspace \
+            -v "${{ github.workspace }}/NextUI/workspace:/root/workspace" \
             ghcr.io/loveretro/tg5040-toolchain:latest \
-            /bin/bash -c 'source ~/.bashrc && cd /root/workspace/tg5040/libmsettings && make build CROSS_COMPILE=aarch64-nextui-linux-gnu- PREFIX=/opt/nextui PREFIX_LOCAL=/opt/nextui && cd /root/workspace/nextui-music-player/src && make PLATFORM=tg5040'
-
-      - name: Build for tg5050
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}/NextUI/workspace:/root/workspace \
-            ghcr.io/loveretro/tg5050-toolchain:latest \
-            /bin/bash -c 'source ~/.bashrc && cp /root/workspace/nextui-music-player/bin/tg5050/libfdk-aac.so* $PREFIX/lib/ && cd /root/workspace/tg5050/libmsettings && make build CROSS_COMPILE=aarch64-nextui-linux-gnu- PREFIX=/opt/nextui PREFIX_LOCAL=/opt/nextui && cd /root/workspace/nextui-music-player/src && make PLATFORM=tg5050'
+            /bin/bash -c 'source /root/.bashrc && cd /root/workspace/tg5040/libmsettings && make build CROSS_COMPILE=aarch64-nextui-linux-gnu- PREFIX=/opt/nextui PREFIX_LOCAL=/opt/nextui && cd /root/workspace/nextui-music-player/src && make PLATFORM=tg5040'
 
       - name: Package release zip
         run: |
-          cd ${{ github.workspace }}/NextUI/workspace/nextui-music-player
+          cd "${{ github.workspace }}/NextUI/workspace/nextui-music-player"
+          sudo chown -R "$(id -u):$(id -g)" .
           rm -rf .github src .git .gitignore LICENSE README.md
           zip -r ../Music.Player.pak.zip .
+
+      - name: Resolve release version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "target=" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${{ github.event.inputs.release_tag }}"
+            if [ -z "$TAG" ]; then
+              TAG="manual-${{ github.run_number }}"
+            fi
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "target=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload pak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Music.Player.pak-${{ steps.version.outputs.tag }}
+          path: NextUI/workspace/Music.Player.pak.zip
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          gh release create "$VERSION" \
-            --repo ${{ github.repository }} \
-            --title "$VERSION" \
-            --generate-notes \
-            "${{ github.workspace }}/NextUI/workspace/Music.Player.pak.zip"
+          ZIP="${{ github.workspace }}/NextUI/workspace/Music.Player.pak.zip"
+          TAG="${{ steps.version.outputs.tag }}"
+          TARGET="${{ steps.version.outputs.target }}"
+          if [ -n "$TARGET" ]; then
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --target "$TARGET" \
+              --generate-notes \
+              "$ZIP"
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --generate-notes \
+              "$ZIP"
+          fi
