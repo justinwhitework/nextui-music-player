@@ -502,12 +502,22 @@ static void rebuild_token_index(void) {
 }
 
 typedef struct {
-    IndexedTrack track;
+    char path[512];
+    uint64_t file_mtime;
+    uint64_t file_size;
+    long bin_offset;
+    bool has_inline_metadata;
+    char title[256];
+    char artist[256];
+    char album[256];
+    char genre[256];
+    char filename_norm[256];
+    AudioFormat format;
 } TrackCacheEntry;
 
 static int track_cache_cmp(const void* a, const void* b) {
-    return strcmp(((const TrackCacheEntry*)a)->track.path,
-                  ((const TrackCacheEntry*)b)->track.path);
+    return strcmp(((const TrackCacheEntry*)a)->path,
+                  ((const TrackCacheEntry*)b)->path);
 }
 
 static void copy_track_fields(IndexedTrack* dst, const IndexedTrack* src) {
@@ -551,7 +561,82 @@ static uint64_t parse_fingerprint_string(const char* s) {
     return 0;
 }
 
-static void load_track_from_json_object(JSON_Object* to, IndexedTrack* tr);
+static const TrackCacheEntry* track_cache_find(TrackCacheEntry* cache, int count, const char* path) {
+    if (!cache || count <= 0 || !path) return NULL;
+
+    TrackCacheEntry key = {{0}};
+    strncpy(key.path, path, sizeof(key.path) - 1);
+    return bsearch(&key, cache, (size_t)count, sizeof(TrackCacheEntry), track_cache_cmp);
+}
+
+static bool track_cache_load_from_bin(long offset, IndexedTrack* tr) {
+    if (!tr || offset < 0) return false;
+
+    FILE* f = fopen(INDEX_BIN_PATH, "rb");
+    if (!f) return false;
+
+    if (fseek(f, offset, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+
+    IndexBinTrack bt;
+    bool ok = fread(&bt, sizeof(bt), 1, f) == 1;
+    fclose(f);
+    if (!ok) return false;
+
+    copy_track_from_bin(&bt, tr);
+    return true;
+}
+
+static bool track_cache_apply(const TrackCacheEntry* cached, IndexedTrack* tr) {
+    if (!cached || !tr) return false;
+
+    if (cached->has_inline_metadata) {
+        strncpy(tr->path, cached->path, sizeof(tr->path) - 1);
+        strncpy(tr->title, cached->title, sizeof(tr->title) - 1);
+        strncpy(tr->artist, cached->artist, sizeof(tr->artist) - 1);
+        strncpy(tr->album, cached->album, sizeof(tr->album) - 1);
+        strncpy(tr->genre, cached->genre, sizeof(tr->genre) - 1);
+        strncpy(tr->filename_norm, cached->filename_norm, sizeof(tr->filename_norm) - 1);
+        tr->format = cached->format;
+        tr->file_mtime = cached->file_mtime;
+        tr->file_size = cached->file_size;
+        index_track_norms(tr);
+        return true;
+    }
+
+    if (cached->bin_offset >= 0) {
+        return track_cache_load_from_bin(cached->bin_offset, tr);
+    }
+
+    return false;
+}
+
+static void load_track_from_json_object(JSON_Object* to, TrackCacheEntry* entry) {
+    if (!to || !entry) return;
+    memset(entry, 0, sizeof(*entry));
+
+    const char* path = json_object_get_string(to, "path");
+    if (!path || !path[0]) return;
+    strncpy(entry->path, path, sizeof(entry->path) - 1);
+
+    const char* title = json_object_get_string(to, "title");
+    if (title) strncpy(entry->title, title, sizeof(entry->title) - 1);
+    const char* artist = json_object_get_string(to, "artist");
+    if (artist) strncpy(entry->artist, artist, sizeof(entry->artist) - 1);
+    const char* album = json_object_get_string(to, "album");
+    if (album) strncpy(entry->album, album, sizeof(entry->album) - 1);
+    const char* genre = json_object_get_string(to, "genre");
+    if (genre) strncpy(entry->genre, genre, sizeof(entry->genre) - 1);
+    const char* fn = json_object_get_string(to, "filename_norm");
+    if (fn) strncpy(entry->filename_norm, fn, sizeof(entry->filename_norm) - 1);
+    entry->format = (AudioFormat)json_object_get_number(to, "format");
+    entry->file_mtime = (uint64_t)json_object_get_number(to, "mtime");
+    entry->file_size = (uint64_t)json_object_get_number(to, "size");
+    entry->has_inline_metadata = true;
+    entry->bin_offset = -1;
+}
 
 static TrackCacheEntry* load_track_cache_from_bin(int* out_count) {
     if (out_count) *out_count = 0;
@@ -580,9 +665,18 @@ static TrackCacheEntry* load_track_cache_from_bin(int* out_count) {
 
     int count = 0;
     for (uint32_t i = 0; i < hdr.track_count; i++) {
+        long offset = ftell(f);
         IndexBinTrack bt;
         if (fread(&bt, sizeof(bt), 1, f) != 1) break;
-        copy_track_from_bin(&bt, &cache[count].track);
+        if (!bt.path[0]) continue;
+
+        TrackCacheEntry* entry = &cache[count];
+        memset(entry, 0, sizeof(*entry));
+        strncpy(entry->path, bt.path, sizeof(entry->path) - 1);
+        entry->file_mtime = bt.mtime;
+        entry->file_size = bt.size;
+        entry->bin_offset = offset;
+        entry->has_inline_metadata = false;
         count++;
     }
 
@@ -631,8 +725,8 @@ static TrackCacheEntry* load_track_cache_from_json(int* out_count) {
     for (size_t i = 0; i < n; i++) {
         JSON_Object* to = json_array_get_object(track_arr, i);
         if (!to) continue;
-        load_track_from_json_object(to, &cache[count].track);
-        if (!cache[count].track.path[0]) continue;
+        load_track_from_json_object(to, &cache[count]);
+        if (!cache[count].path[0]) continue;
         count++;
     }
 
@@ -833,7 +927,7 @@ static bool load_json_index(uint64_t expected_fp) {
         for (size_t i = 0; i < n; i++) {
             JSON_Object* to = json_array_get_object(track_arr, i);
             if (!to) continue;
-            load_track_from_json_object(to, &tracks[track_count]);
+            load_indexed_track_from_json(to, &tracks[track_count]);
             track_count++;
         }
     }
@@ -876,15 +970,10 @@ static bool load_json_index(uint64_t expected_fp) {
     return true;
 }
 
-static const TrackCacheEntry* track_cache_find(TrackCacheEntry* cache, int count, const char* path) {
-    if (!cache || count <= 0 || !path) return NULL;
+static void load_indexed_track_from_json(JSON_Object* to, IndexedTrack* tr) {
+    if (!to || !tr) return;
+    memset(tr, 0, sizeof(*tr));
 
-    TrackCacheEntry key = {{0}};
-    strncpy(key.track.path, path, sizeof(key.track.path) - 1);
-    return bsearch(&key, cache, (size_t)count, sizeof(TrackCacheEntry), track_cache_cmp);
-}
-
-static void load_track_from_json_object(JSON_Object* to, IndexedTrack* tr) {
     const char* path = json_object_get_string(to, "path");
     if (path) strncpy(tr->path, path, sizeof(tr->path) - 1);
     const char* title = json_object_get_string(to, "title");
@@ -920,14 +1009,25 @@ static void rebuild_index(uint64_t fp) {
 
     int cache_count = 0;
     TrackCacheEntry* cache = load_track_cache(&cache_count);
+    {
+        char logbuf[96];
+        snprintf(logbuf, sizeof(logbuf), "rebuild_index: cache %d entries", cache_count);
+        index_log(logbuf);
+    }
 
     set_status("Scanning music...");
     index_log("rebuild_index: scanning music paths");
     {
         char** paths = NULL;
         int count = Playlist_collectPathsEx(MUSIC_PATH, &paths, LIBRARY_MAX_TRACKS, true);
+        {
+            char logbuf[96];
+            snprintf(logbuf, sizeof(logbuf), "rebuild_index: found %d paths", count);
+            index_log(logbuf);
+        }
         if (count > 0 && paths) {
-            tracks = calloc(count, sizeof(IndexedTrack));
+            int tracks_cap = count < 256 ? count : 256;
+            tracks = calloc((size_t)tracks_cap, sizeof(IndexedTrack));
             if (tracks) {
                 char status[128];
                 for (int i = 0; i < count; i++) {
@@ -937,19 +1037,37 @@ static void rebuild_index(uint64_t fp) {
                     }
 
                     struct stat st;
-                    if (stat(paths[i], &st) != 0) continue;
+                    if (stat(paths[i], &st) != 0 || !S_ISREG(st.st_mode)) continue;
+
+                    if (track_count >= tracks_cap) {
+                        int new_cap = tracks_cap * 2;
+                        if (new_cap > count) new_cap = count;
+                        if (new_cap <= tracks_cap) break;
+                        IndexedTrack* grown = realloc(tracks, (size_t)new_cap * sizeof(IndexedTrack));
+                        if (!grown) {
+                            index_log("rebuild_index: tracks realloc failed");
+                            break;
+                        }
+                        memset(grown + tracks_cap, 0,
+                               (size_t)(new_cap - tracks_cap) * sizeof(IndexedTrack));
+                        tracks = grown;
+                        tracks_cap = new_cap;
+                    }
 
                     IndexedTrack* tr = &tracks[track_count];
                     const TrackCacheEntry* cached = track_cache_find(cache, cache_count, paths[i]);
-                    if (cached && cached->track.file_mtime != 0 &&
-                        cached->track.file_mtime == (uint64_t)st.st_mtime &&
-                        cached->track.file_size == (uint64_t)st.st_size) {
-                        copy_track_fields(tr, &cached->track);
+                    if (cached && cached->file_mtime != 0 &&
+                        cached->file_mtime == (uint64_t)st.st_mtime &&
+                        cached->file_size == (uint64_t)st.st_size &&
+                        track_cache_apply(cached, tr)) {
+                        /* cache hit */
                     } else {
+                        memset(tr, 0, sizeof(*tr));
                         strncpy(tr->path, paths[i], sizeof(tr->path) - 1);
                         tr->format = Player_detectFormat(paths[i]);
 
                         TrackMetadata meta;
+                        memset(&meta, 0, sizeof(meta));
                         Metadata_readFromFileEx(paths[i], tr->format, &meta);
                         strncpy(tr->title, meta.title, sizeof(tr->title) - 1);
                         strncpy(tr->artist, meta.artist, sizeof(tr->artist) - 1);
@@ -969,6 +1087,13 @@ static void rebuild_index(uint64_t fp) {
                 }
                 snprintf(status, sizeof(status), "Reading tags... %d/%d", count, count);
                 set_status(status);
+                {
+                    char logbuf[96];
+                    snprintf(logbuf, sizeof(logbuf), "rebuild_index: indexed %d tracks", track_count);
+                    index_log(logbuf);
+                }
+            } else {
+                index_log("rebuild_index: tracks alloc failed");
             }
             Playlist_freePaths(paths, count);
         }

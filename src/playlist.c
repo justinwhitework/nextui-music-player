@@ -140,7 +140,7 @@ static int scan_directory_recursive(PlaylistContext* ctx, const char* path, int 
             }
             dirs[dir_count] = strdup(ent->d_name);
             if (dirs[dir_count]) dir_count++;
-        } else if (is_audio_file(ent->d_name)) {
+        } else if (S_ISREG(st.st_mode) && is_audio_file(ent->d_name)) {
             // Add audio file name
             if (file_count >= files_capacity) {
                 files_capacity *= 2;
@@ -249,7 +249,7 @@ int Playlist_buildFromDirectory(PlaylistContext* ctx, const char* path, const ch
             }
             dirs[dir_count] = strdup(ent->d_name);
             if (dirs[dir_count]) dir_count++;
-        } else if (is_audio_file(ent->d_name)) {
+        } else if (S_ISREG(st.st_mode) && is_audio_file(ent->d_name)) {
             if (file_count >= files_capacity) {
                 files_capacity *= 2;
                 char** new_files = realloc(files, sizeof(char*) * files_capacity);
@@ -377,7 +377,7 @@ static void collect_paths_recursive(const char* path, int depth,
             }
             dirs[dir_count] = strdup(ent->d_name);
             if (dirs[dir_count]) dir_count++;
-        } else if (is_audio_file(ent->d_name)) {
+        } else if (S_ISREG(st.st_mode) && is_audio_file(ent->d_name)) {
             if (file_count >= files_cap) {
                 files_cap *= 2;
                 char** nf = realloc(files, sizeof(char*) * files_cap);

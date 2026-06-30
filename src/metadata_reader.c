@@ -11,6 +11,8 @@
 #define STB_VORBIS_HEADER_ONLY
 #include "audio/stb_vorbis.h"
 
+#define ID3_MAX_FRAME_SIZE (256 * 1024)
+
 static void trim_inplace(char* s) {
     if (!s) return;
     size_t len = strlen(s);
@@ -188,6 +190,11 @@ static void parse_mp3_tags(const char* filepath, TrackMetadata* out) {
             : read_be32(&frame_hdr[4]);
         pos += 10;
         if (frame_size == 0 || pos + frame_size > end) break;
+        if (frame_size > ID3_MAX_FRAME_SIZE) {
+            if (fseek(f, frame_size, SEEK_CUR) != 0) break;
+            pos += frame_size;
+            continue;
+        }
 
         if (frame_id[0] == 'T') {
             uint8_t* frame_data = malloc(frame_size);
@@ -240,8 +247,13 @@ static void flac_meta_cb(void* user, drflac_metadata* md) {
 
     const char* p = md->data.vorbis_comment.pComments;
     for (uint32_t i = 0; i < md->data.vorbis_comment.commentCount && p; i++) {
-        uint32_t len = *(const uint32_t*)p;
+        uint32_t len;
+        memcpy(&len, p, sizeof(len));
         p += 4;
+        if (len > 4096) {
+            p += len;
+            continue;
+        }
         char* comment = malloc(len + 1);
         if (comment) {
             memcpy(comment, p, len);
@@ -294,6 +306,7 @@ void Metadata_readFromFileEx(const char* filepath, AudioFormat fmt, TrackMetadat
         case AUDIO_FORMAT_M4A:
         case AUDIO_FORMAT_AAC: {
             M4ATags tags;
+            memset(&tags, 0, sizeof(tags));
             if (M4A_readTags(filepath, &tags) == 0) {
                 if (tags.title[0]) copy_field(out->title, sizeof(out->title), tags.title);
                 if (tags.artist[0]) copy_field(out->artist, sizeof(out->artist), tags.artist);
@@ -302,6 +315,9 @@ void Metadata_readFromFileEx(const char* filepath, AudioFormat fmt, TrackMetadat
             }
             break;
         }
+        case AUDIO_FORMAT_WAV:
+        case AUDIO_FORMAT_OPUS:
+        case AUDIO_FORMAT_MOD:
         default:
             break;
     }
