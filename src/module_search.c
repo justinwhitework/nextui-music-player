@@ -15,6 +15,8 @@
 #include "search_history.h"
 #include "ui_search.h"
 #include "ui_utils.h"
+#include "settings.h"
+#include "track_art.h"
 
 typedef enum {
     SEARCH_STATE_BUILDING,
@@ -150,6 +152,24 @@ static void go_search_home(SearchState* state, int* home_selected, int* home_scr
     *state = SEARCH_STATE_QUERY;
     *home_selected = 0;
     *home_scroll = 0;
+}
+
+static ModuleExitReason play_track_from_row(SDL_Surface** screen, const SearchResultRow* row) {
+    if (!row || row->type != SEARCH_ITEM_TRACK) return MODULE_EXIT_TO_MENU;
+
+    PlaylistTrack tracks[1];
+    memset(tracks, 0, sizeof(tracks));
+    strncpy(tracks[0].path, row->path, sizeof(tracks[0].path) - 1);
+    strncpy(tracks[0].name, row->label, sizeof(tracks[0].name) - 1);
+    tracks[0].format = row->format;
+
+    PlayerModule_setResumePlaylistPath(NULL);
+    ModuleExitReason reason = PlayerModule_runWithPlaylist(*screen, tracks, 1, 0);
+    {
+        SDL_Surface* ns = DisplayHelper_getReinitScreen();
+        if (ns) *screen = ns;
+    }
+    return reason;
 }
 
 static void activate_home_row(SDL_Surface** screen, int index, SearchState* state,
@@ -329,8 +349,13 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 if (!results_index_is_header(&search_results, results_selected)) {
                     SearchResultRow row;
                     if (search_result_at(&search_results, results_selected, &row)) {
-                        load_detail_from_row(&row);
-                        state = SEARCH_STATE_DETAIL;
+                        if (row.type == SEARCH_ITEM_TRACK) {
+                            ModuleExitReason reason = play_track_from_row(&screen, &row);
+                            if (reason == MODULE_EXIT_QUIT) return MODULE_EXIT_QUIT;
+                        } else {
+                            load_detail_from_row(&row);
+                            state = SEARCH_STATE_DETAIL;
+                        }
                         dirty = 1;
                     }
                 }
@@ -372,6 +397,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 ModuleExitReason reason = PlayerModule_runWithPlaylist(
                     screen, detail_tracks, detail_track_count, detail_selected);
                 if (reason == MODULE_EXIT_QUIT) return MODULE_EXIT_QUIT;
+                {
+                    SDL_Surface* ns = DisplayHelper_getReinitScreen();
+                    if (ns) screen = ns;
+                }
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_B)) {
@@ -381,6 +410,12 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
         }
 
         ModuleCommon_PWR_update(&dirty, &show_setting);
+
+        if ((state == SEARCH_STATE_RESULTS || state == SEARCH_STATE_DETAIL) &&
+            Settings_getTooltipArtwork()) {
+            TrackArt_tick();
+            if (TrackArt_hasPendingWork()) dirty = 1;
+        }
 
         if (dirty) {
             switch (state) {

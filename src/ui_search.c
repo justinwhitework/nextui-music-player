@@ -247,6 +247,7 @@ void render_search_results(SDL_Surface* screen, int show_setting,
             int icon_x = pos.text_x;
             SDL_Surface* thumb = NULL;
             if (item.type == SEARCH_ITEM_TRACK) {
+                TrackArt_request(item.path);
                 thumb = TrackArt_getThumbnail(item.path, icon_size);
             } else {
                 thumb = PlaylistArt_getThumbnail(item.path, icon_size);
@@ -265,8 +266,17 @@ void render_search_results(SDL_Surface* screen, int show_setting,
     }
 
     render_scroll_indicators(screen, scroll, layout.items_per_page, total);
+
+    SearchResultRow selected_row;
+    bool have_row = search_result_at(results, selected, &selected_row);
+    bool selected_is_track = have_row && selected_row.type == SEARCH_ITEM_TRACK;
+
     GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "SELECT", "Y", "SEARCH", NULL}, 1, screen, 1);
+    if (selected_is_track) {
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "PLAY", "Y", "SEARCH", NULL}, 1, screen, 1);
+    } else {
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "OPEN", "Y", "SEARCH", NULL}, 1, screen, 1);
+    }
 }
 
 void render_search_detail(SDL_Surface* screen, int show_setting,
@@ -313,6 +323,7 @@ void render_search_detail(SDL_Surface* screen, int show_setting,
 
         if (use_icon_slot) {
             int icon_y = y + (layout.item_h - icon_size) / 2;
+            TrackArt_request(tr->path);
             SDL_Surface* thumb = TrackArt_getThumbnail(tr->path, icon_size);
             render_list_icon(screen, pos.text_x, icon_y, icon_size, thumb, tr->format, is_selected);
         }
