@@ -253,6 +253,14 @@ static void fingerprint_to_string(const LibraryFingerprint* fp, char* out, int o
              (unsigned long long)fp->hash);
 }
 
+static void token_hash_clear(void) {
+    memset(token_hash, 0, sizeof(token_hash));
+    free(token_hash_nodes);
+    token_hash_nodes = NULL;
+    token_hash_node_count = 0;
+    token_hash_node_cap = 0;
+}
+
 static void free_index_data(void) {
     for (int i = 0; i < token_count; i++) {
         free(tokens[i].track_ids);
