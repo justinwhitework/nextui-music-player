@@ -282,14 +282,6 @@ static void free_index_data(void) {
     token_hash_clear();
 }
 
-static void token_hash_clear(void) {
-    memset(token_hash, 0, sizeof(token_hash));
-    free(token_hash_nodes);
-    token_hash_nodes = NULL;
-    token_hash_node_count = 0;
-    token_hash_node_cap = 0;
-}
-
 static void token_hash_insert(int token_idx) {
     if (token_idx < 0 || token_idx >= token_count) return;
 
