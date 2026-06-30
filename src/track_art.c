@@ -35,6 +35,17 @@ static TrackArtQueueEntry track_art_queue[TRACK_ART_QUEUE_SIZE];
 static int track_art_queue_count = 0;
 static int track_art_queue_head = 0;
 
+#define FILE_ART_CACHE_SIZE 16
+
+typedef struct {
+    char path[512];
+    SDL_Surface* thumb;
+    int thumb_size;
+} FileArtCacheEntry;
+
+static FileArtCacheEntry file_art_cache[FILE_ART_CACHE_SIZE];
+static int file_art_cache_count = 0;
+
 static uint32_t read_syncsafe_int(const uint8_t* data) {
     return ((uint32_t)(data[0] & 0x7F) << 21) |
            ((uint32_t)(data[1] & 0x7F) << 14) |
@@ -350,17 +361,6 @@ bool TrackArt_findDirArtPath(const char* dir, char* out, int out_size) {
     }
     return false;
 }
-
-#define FILE_ART_CACHE_SIZE 16
-
-typedef struct {
-    char path[512];
-    SDL_Surface* thumb;
-    int thumb_size;
-} FileArtCacheEntry;
-
-static FileArtCacheEntry file_art_cache[FILE_ART_CACHE_SIZE];
-static int file_art_cache_count = 0;
 
 static SDL_Surface* load_image_file(const char* path) {
     FILE* f = fopen(path, "rb");
