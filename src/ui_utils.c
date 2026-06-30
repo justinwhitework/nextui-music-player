@@ -771,7 +771,11 @@ void render_simple_menu(SDL_Surface* screen, int show_setting, int menu_selected
 
     // Button hints
     GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", (char*)config->btn_b_label, "A", "OPEN", NULL}, 1, screen, 1);
+    if (config->footer_buttons) {
+        GFX_blitButtonGroup(config->footer_buttons, 1, screen, 1);
+    } else {
+        GFX_blitButtonGroup((char*[]){"B", (char*)config->btn_b_label, "A", "OPEN", NULL}, 1, screen, 1);
+    }
 }
 
 

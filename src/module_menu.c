@@ -85,6 +85,10 @@ int MenuModule_run(SDL_Surface* screen) {
             if (!has_first) selection += 1;  // Skip first-item slot
             return selection;
         }
+        else if (PAD_justPressed(BTN_Y)) {
+            GFX_clearLayers(LAYER_SCROLLTEXT);
+            return MENU_SEARCH;
+        }
         else if (PAD_justPressed(BTN_X)) {
             if (menu_selected == 0) {
                 if (first_item_mode == MENU_FIRST_NOW_PLAYING) {

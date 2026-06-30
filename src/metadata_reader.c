@@ -8,6 +8,7 @@
 #include <ctype.h>
 
 #include "audio/dr_flac.h"
+#define STB_VORBIS_HEADER_ONLY
 #include "audio/stb_vorbis.h"
 
 static void trim_inplace(char* s) {
@@ -232,9 +233,9 @@ static void parse_ogg_tags(const char* filepath, TrackMetadata* out) {
     stb_vorbis* v = stb_vorbis_open_filename(filepath, &error, NULL);
     if (!v) return;
 
-    int count = stb_vorbis_get_comment_count(v);
-    for (int i = 0; i < count; i++) {
-        const char* comment = stb_vorbis_get_comment(v, i);
+    stb_vorbis_comment comments = stb_vorbis_get_comment(v);
+    for (int i = 0; i < comments.comment_list_length; i++) {
+        const char* comment = comments.comment_list[i];
         if (comment) parse_vorbis_field(comment, out);
     }
     stb_vorbis_close(v);

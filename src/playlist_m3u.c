@@ -169,8 +169,16 @@ static void append_m3u_entry(PlaylistInfo* out, int max, int* count,
     (*count)++;
 }
 
+static bool skip_dirent_name(const char* name, bool include_hidden) {
+    if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
+        return true;
+    }
+    return !include_hidden && name[0] == '.';
+}
+
 static void list_all_recursive(const char* dir, int max_scan_depth,
-                               PlaylistInfo* out, int max, int* count) {
+                               PlaylistInfo* out, int max, int* count,
+                               bool include_hidden) {
     if (!dir || !out || !count || *count >= max) return;
 
     DIR* d = opendir(dir);
@@ -179,7 +187,7 @@ static void list_all_recursive(const char* dir, int max_scan_depth,
     int depth = M3U_dirDepth(dir);
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL && *count < max) {
-        if (ent->d_name[0] == '.') continue;
+        if (skip_dirent_name(ent->d_name, include_hidden)) continue;
 
         char full_path[512];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir, ent->d_name);
@@ -189,7 +197,7 @@ static void list_all_recursive(const char* dir, int max_scan_depth,
 
         if (S_ISDIR(st.st_mode)) {
             if (depth < max_scan_depth) {
-                list_all_recursive(full_path, max_scan_depth, out, max, count);
+                list_all_recursive(full_path, max_scan_depth, out, max, count, include_hidden);
             }
             continue;
         }
@@ -272,12 +280,16 @@ static int compare_picker_entries(const void* a, const void* b) {
     return compare_by_path(a, b);
 }
 
-int M3U_listAllPlaylists(PlaylistInfo* out, int max, int max_scan_depth) {
+int M3U_listAllPlaylistsEx(PlaylistInfo* out, int max, int max_scan_depth, bool include_hidden) {
     if (!out || max <= 0) return 0;
     int count = 0;
-    list_all_recursive(PLAYLISTS_DIR, max_scan_depth, out, max, &count);
+    list_all_recursive(PLAYLISTS_DIR, max_scan_depth, out, max, &count, include_hidden);
     sort_playlists_by_name(out, count);
     return count;
+}
+
+int M3U_listAllPlaylists(PlaylistInfo* out, int max, int max_scan_depth) {
+    return M3U_listAllPlaylistsEx(out, max, max_scan_depth, false);
 }
 
 int M3U_listPlaylistsForPicker(PlaylistInfo* out, int max, int max_scan_depth) {
@@ -303,7 +315,7 @@ int M3U_listPlaylistsForPicker(PlaylistInfo* out, int max, int max_scan_depth) {
                 struct stat st;
                 if (stat(full_path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
 
-                list_all_recursive(full_path, max_scan_depth, out, max, &count);
+                list_all_recursive(full_path, max_scan_depth, out, max, &count, false);
             }
             closedir(d);
         }

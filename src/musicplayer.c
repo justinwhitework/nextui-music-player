@@ -29,6 +29,7 @@
 #include "downloader.h"
 #include "module_system.h"
 #include "module_settings.h"
+#include "module_search.h"
 #include "settings.h"
 #include "resume.h"
 #include "background.h"
@@ -186,6 +187,9 @@ int main(int argc, char* argv[]) {
                 break;
             case MENU_SETTINGS:
                 reason = SettingsModule_run(screen);
+                break;
+            case MENU_SEARCH:
+                reason = SearchModule_run(screen);
                 break;
         }
 
