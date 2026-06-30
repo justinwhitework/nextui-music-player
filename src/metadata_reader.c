@@ -174,6 +174,8 @@ static void parse_mp3_tags(const char* filepath, TrackMetadata* out) {
             read_id3_text(&tag_data[pos], frame_size, temp, sizeof(temp));
             if (strcmp(frame_id, "TIT2") == 0 && temp[0]) copy_field(out->title, sizeof(out->title), temp);
             else if (strcmp(frame_id, "TPE1") == 0 && temp[0]) copy_field(out->artist, sizeof(out->artist), temp);
+            else if (strcmp(frame_id, "TPE2") == 0 && temp[0] && !out->artist[0])
+                copy_field(out->artist, sizeof(out->artist), temp);
             else if (strcmp(frame_id, "TALB") == 0 && temp[0]) copy_field(out->album, sizeof(out->album), temp);
             else if (strcmp(frame_id, "TCON") == 0 && temp[0]) copy_field(out->genre, sizeof(out->genre), temp);
         }
@@ -195,6 +197,8 @@ static void parse_vorbis_field(const char* comment, TrackMetadata* out) {
         copy_field(out->artist, sizeof(out->artist), value);
     else if (strncasecmp(comment, "ALBUM", key_len) == 0 && key_len == 5 && value[0])
         copy_field(out->album, sizeof(out->album), value);
+    else if (strncasecmp(comment, "ALBUMARTIST", key_len) == 0 && key_len == 11 && value[0] && !out->artist[0])
+        copy_field(out->artist, sizeof(out->artist), value);
     else if (strncasecmp(comment, "GENRE", key_len) == 0 && key_len == 5 && value[0])
         copy_field(out->genre, sizeof(out->genre), value);
 }

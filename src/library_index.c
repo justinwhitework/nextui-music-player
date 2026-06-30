@@ -21,6 +21,7 @@
 #include "api.h"
 #include "include/parson/parson.h"
 
+#define LIBRARY_INDEX_FORMAT_VERSION 2
 #define MUSIC_PATH SDCARD_PATH "/Music"
 #define INDEX_PATH SHARED_USERDATA_PATH "/music-player/library_index.json"
 #define LIBRARY_MAX_TRACKS 32768
@@ -33,6 +34,10 @@ typedef struct {
     char artist[256];
     char album[256];
     char genre[256];
+    char title_norm[256];
+    char artist_norm[256];
+    char album_norm[256];
+    char genre_norm[256];
     char filename_norm[256];
     AudioFormat format;
 } IndexedTrack;
@@ -85,7 +90,8 @@ static void set_status(const char* msg) {
 }
 
 static void fingerprint_to_string(const LibraryFingerprint* fp, char* out, int out_size) {
-    snprintf(out, out_size, "%llu_%llu",
+    snprintf(out, out_size, "v%d_%llu_%llu",
+             LIBRARY_INDEX_FORMAT_VERSION,
              (unsigned long long)fp->file_count,
              (unsigned long long)fp->latest_mtime);
 }
@@ -235,9 +241,28 @@ static void add_token_cb(const char* token, void* userdata) {
     else token_add_playlist(ti, ctx->id);
 }
 
+static void index_track_norms(IndexedTrack* tr) {
+    if (!tr) return;
+    Metadata_copyNormalized(tr->title_norm, sizeof(tr->title_norm), tr->title);
+    Metadata_copyNormalized(tr->artist_norm, sizeof(tr->artist_norm), tr->artist);
+    Metadata_copyNormalized(tr->album_norm, sizeof(tr->album_norm), tr->album);
+    Metadata_copyNormalized(tr->genre_norm, sizeof(tr->genre_norm), tr->genre);
+}
+
+static void index_phrase_token(const char* norm_text, int track_id) {
+    if (!norm_text || norm_text[0] == '\0') return;
+    size_t len = strlen(norm_text);
+    if (len < 2 || len >= sizeof(tokens[0].token)) return;
+
+    int ti = ensure_token(norm_text);
+    if (ti >= 0) token_add_track(ti, track_id);
+}
+
 static void index_track_tokens(int id) {
     if (id < 0 || id >= track_count) return;
     IndexedTrack* tr = &tracks[id];
+    index_track_norms(tr);
+
     TokenAddCtx ctx = {.id = id, .is_track = true};
 
     Metadata_foreachToken(tr->title, add_token_cb, &ctx);
@@ -245,6 +270,16 @@ static void index_track_tokens(int id) {
     Metadata_foreachToken(tr->album, add_token_cb, &ctx);
     Metadata_foreachToken(tr->genre, add_token_cb, &ctx);
     Metadata_foreachToken(tr->filename_norm, add_token_cb, &ctx);
+
+    index_phrase_token(tr->title_norm, id);
+    index_phrase_token(tr->artist_norm, id);
+    index_phrase_token(tr->album_norm, id);
+    index_phrase_token(tr->genre_norm, id);
+
+    char combined[512];
+    snprintf(combined, sizeof(combined), "%s %s %s %s",
+             tr->title_norm, tr->artist_norm, tr->album_norm, tr->genre_norm);
+    Metadata_foreachToken(combined, add_token_cb, &ctx);
 }
 
 static void index_playlist_tokens(int id) {
@@ -296,6 +331,7 @@ static bool load_json_index(const char* expected_fp) {
             const char* fn = json_object_get_string(to, "filename_norm");
             if (fn) strncpy(tracks[track_count].filename_norm, fn, sizeof(tracks[track_count].filename_norm) - 1);
             tracks[track_count].format = (AudioFormat)json_object_get_number(to, "format");
+            index_track_norms(&tracks[track_count]);
             track_count++;
         }
     }
@@ -474,6 +510,7 @@ static void rebuild_index(const char* fp_str) {
                     const char* base = strrchr(paths[i], '/');
                     base = base ? base + 1 : paths[i];
                     Metadata_copyNormalized(tr->filename_norm, sizeof(tr->filename_norm), base);
+                    index_track_norms(tr);
 
                     track_count++;
                 }
@@ -638,6 +675,10 @@ static void mark_hits_cb(const char* token, void* userdata) {
     }
 }
 
+static bool track_field_contains_token(const char* field, const char* token) {
+    return field && field[0] && token && token[0] && strstr(field, token) != NULL;
+}
+
 static int score_track(int id, const char query_tokens[][48], int query_token_count) {
     if (id < 0 || id >= track_count) return 0;
     IndexedTrack* tr = &tracks[id];
@@ -645,19 +686,61 @@ static int score_track(int id, const char query_tokens[][48], int query_token_co
 
     for (int q = 0; q < query_token_count; q++) {
         const char* qt = query_tokens[q];
-        char norm[256];
-
-        Metadata_copyNormalized(norm, sizeof(norm), tr->title);
-        if (strstr(norm, qt)) score += 10;
-        Metadata_copyNormalized(norm, sizeof(norm), tr->artist);
-        if (strstr(norm, qt)) score += 8;
-        Metadata_copyNormalized(norm, sizeof(norm), tr->album);
-        if (strstr(norm, qt)) score += 6;
-        Metadata_copyNormalized(norm, sizeof(norm), tr->genre);
-        if (strstr(norm, qt)) score += 4;
-        if (strstr(tr->filename_norm, qt)) score += 2;
+        if (track_field_contains_token(tr->title_norm, qt)) score += 10;
+        if (track_field_contains_token(tr->artist_norm, qt)) score += 8;
+        if (track_field_contains_token(tr->album_norm, qt)) score += 6;
+        if (track_field_contains_token(tr->genre_norm, qt)) score += 4;
+        if (track_field_contains_token(tr->filename_norm, qt)) score += 2;
     }
     return score;
+}
+
+static int score_track_with_phrase(int id, const char query_tokens[][48], int query_token_count,
+                                   const char* query_phrase) {
+    int score = score_track(id, query_tokens, query_token_count);
+    if (!query_phrase || !query_phrase[0] || id < 0 || id >= track_count) return score;
+
+    IndexedTrack* tr = &tracks[id];
+    if (track_field_contains_token(tr->title_norm, query_phrase)) score += 15;
+    if (track_field_contains_token(tr->artist_norm, query_phrase)) score += 12;
+    if (track_field_contains_token(tr->album_norm, query_phrase)) score += 10;
+    return score;
+}
+
+static bool track_matches_all_tokens(int id, const char query_tokens[][48], int query_token_count) {
+    if (id < 0 || id >= track_count || query_token_count <= 0) return false;
+
+    IndexedTrack* tr = &tracks[id];
+    const char* fields[] = {
+        tr->title_norm, tr->artist_norm, tr->album_norm, tr->genre_norm, tr->filename_norm
+    };
+
+    for (int q = 0; q < query_token_count; q++) {
+        const char* qt = query_tokens[q];
+        bool found = false;
+        for (int f = 0; f < 5; f++) {
+            if (track_field_contains_token(fields[f], qt)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool track_matches_query(int id, const char query_tokens[][48], int query_token_count,
+                                const char* query_phrase) {
+    if (id < 0 || id >= track_count) return false;
+
+    if (query_phrase && strlen(query_phrase) >= 3) {
+        IndexedTrack* tr = &tracks[id];
+        if (track_field_contains_token(tr->album_norm, query_phrase)) return true;
+        if (track_field_contains_token(tr->artist_norm, query_phrase)) return true;
+        if (track_field_contains_token(tr->title_norm, query_phrase)) return true;
+    }
+
+    return track_matches_all_tokens(id, query_tokens, query_token_count);
 }
 
 static int score_nested_playlist(int id, const char query_tokens[][48], int query_token_count) {
@@ -761,6 +844,9 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     int query_token_count = qctx.count;
     if (query_token_count == 0) return false;
 
+    char query_phrase[512];
+    Metadata_copyNormalized(query_phrase, sizeof(query_phrase), query);
+
     bool* track_hit = calloc(track_count, sizeof(bool));
     bool* playlist_hit = calloc(playlist_count, sizeof(bool));
     if (!track_hit || !playlist_hit) {
@@ -774,16 +860,18 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
         int ti = find_token(query_tokens[q]);
         if (ti >= 0) {
             IndexToken* t = &tokens[ti];
-            for (int i = 0; i < t->track_count; i++) {
-                int id = t->track_ids[i];
-                if (id >= 0 && id < track_count) track_hit[id] = true;
-            }
             for (int i = 0; i < t->playlist_count; i++) {
                 int id = t->playlist_ids[i];
                 if (id >= 0 && id < playlist_count) playlist_hit[id] = true;
             }
         } else {
             Metadata_foreachToken(query_tokens[q], mark_hits_cb, &hctx);
+        }
+    }
+
+    for (int i = 0; i < track_count; i++) {
+        if (track_matches_query(i, query_tokens, query_token_count, query_phrase)) {
+            track_hit[i] = true;
         }
     }
 
@@ -822,7 +910,7 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
 
     for (int i = 0; i < track_count; i++) {
         if (!track_hit[i]) continue;
-        int sc = score_track(i, query_tokens, query_token_count);
+        int sc = score_track_with_phrase(i, query_tokens, query_token_count, query_phrase);
         if (sc <= 0) sc = 1;
         mixed_items[mixed_n++] = (ScoredItem){
             .id = i, .score = sc, .type = SEARCH_ITEM_TRACK
