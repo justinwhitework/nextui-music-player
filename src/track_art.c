@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -245,6 +246,13 @@ void TrackArt_clearCache(void) {
     }
     track_art_queue_count = 0;
     track_art_queue_head = 0;
+
+    for (int i = 0; i < file_art_cache_count; i++) {
+        if (file_art_cache[i].thumb) {
+            SDL_FreeSurface(file_art_cache[i].thumb);
+        }
+    }
+    file_art_cache_count = 0;
 }
 
 void TrackArt_request(const char* filepath) {
@@ -305,4 +313,151 @@ SDL_Surface* TrackArt_getThumbnail(const char* filepath, int size) {
     entry->thumb = scaled;
     entry->thumb_size = size;
     return entry->thumb;
+}
+
+static const char* const k_sidecar_exts[] = {".png", ".webp", ".jpg", ".jpeg", NULL};
+
+bool TrackArt_findSidecarPath(const char* filepath, char* out, int out_size) {
+    if (!filepath || !out || out_size <= 0) return false;
+
+    char base[512];
+    strncpy(base, filepath, sizeof(base) - 1);
+    base[sizeof(base) - 1] = '\0';
+
+    char* dot = strrchr(base, '.');
+    if (dot) *dot = '\0';
+
+    for (int i = 0; k_sidecar_exts[i]; i++) {
+        snprintf(out, out_size, "%s%s", base, k_sidecar_exts[i]);
+        if (access(out, F_OK) == 0) return true;
+    }
+    return false;
+}
+
+static const char* const k_dir_art_names[] = {
+    "folder.png", "folder.webp", "Folder.png", "Folder.webp",
+    "cover.png", "cover.webp", "Cover.png", "Cover.webp",
+    "album.png", "album.webp", "Album.png", "Album.webp",
+    NULL
+};
+
+bool TrackArt_findDirArtPath(const char* dir, char* out, int out_size) {
+    if (!dir || !dir[0] || !out || out_size <= 0) return false;
+
+    for (int i = 0; k_dir_art_names[i]; i++) {
+        snprintf(out, out_size, "%s/%s", dir, k_dir_art_names[i]);
+        if (access(out, F_OK) == 0) return true;
+    }
+    return false;
+}
+
+#define FILE_ART_CACHE_SIZE 16
+
+typedef struct {
+    char path[512];
+    SDL_Surface* thumb;
+    int thumb_size;
+} FileArtCacheEntry;
+
+static FileArtCacheEntry file_art_cache[FILE_ART_CACHE_SIZE];
+static int file_art_cache_count = 0;
+
+static SDL_Surface* load_image_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > 2 * 1024 * 1024) {
+        fclose(f);
+        return NULL;
+    }
+
+    uint8_t* data = (uint8_t*)malloc((size_t)fsize);
+    if (!data) {
+        fclose(f);
+        return NULL;
+    }
+
+    if (fread(data, 1, (size_t)fsize, f) != (size_t)fsize) {
+        free(data);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+
+    SDL_RWops* rw = SDL_RWFromConstMem(data, fsize);
+    SDL_Surface* raw = NULL;
+    if (rw) raw = IMG_Load_RW(rw, 1);
+    free(data);
+    return raw;
+}
+
+static SDL_Surface* get_file_art_thumbnail(const char* image_path, int size) {
+    if (!image_path || !image_path[0] || size <= 0) return NULL;
+
+    for (int i = 0; i < file_art_cache_count; i++) {
+        if (strcmp(file_art_cache[i].path, image_path) == 0) {
+            if (file_art_cache[i].thumb && file_art_cache[i].thumb_size == size) {
+                return file_art_cache[i].thumb;
+            }
+            if (file_art_cache[i].thumb) {
+                SDL_FreeSurface(file_art_cache[i].thumb);
+                file_art_cache[i].thumb = NULL;
+            }
+            SDL_Surface* raw = load_image_file(image_path);
+            if (raw) {
+                file_art_cache[i].thumb = image_scale_to_square(raw, size);
+                SDL_FreeSurface(raw);
+            }
+            file_art_cache[i].thumb_size = size;
+            return file_art_cache[i].thumb;
+        }
+    }
+
+    SDL_Surface* raw = load_image_file(image_path);
+    if (!raw) return NULL;
+
+    SDL_Surface* thumb = image_scale_to_square(raw, size);
+    SDL_FreeSurface(raw);
+    if (!thumb) return NULL;
+
+    if (file_art_cache_count >= FILE_ART_CACHE_SIZE) {
+        SDL_FreeSurface(file_art_cache[0].thumb);
+        for (int i = 1; i < file_art_cache_count; i++) {
+            file_art_cache[i - 1] = file_art_cache[i];
+        }
+        file_art_cache_count--;
+    }
+
+    FileArtCacheEntry* slot = &file_art_cache[file_art_cache_count++];
+    memset(slot, 0, sizeof(*slot));
+    strncpy(slot->path, image_path, sizeof(slot->path) - 1);
+    slot->thumb = thumb;
+    slot->thumb_size = size;
+    return thumb;
+}
+
+SDL_Surface* TrackArt_getHistoryThumbnail(const char* item_path, const char* art_dir, int size) {
+    if (!item_path || !item_path[0] || size <= 0) return NULL;
+
+    TrackArt_request(item_path);
+    SDL_Surface* thumb = TrackArt_getThumbnail(item_path, size);
+    if (thumb) return thumb;
+
+    char sidecar[512];
+    if (TrackArt_findSidecarPath(item_path, sidecar, sizeof(sidecar))) {
+        thumb = get_file_art_thumbnail(sidecar, size);
+        if (thumb) return thumb;
+    }
+
+    if (art_dir && art_dir[0]) {
+        char dir_art[512];
+        if (TrackArt_findDirArtPath(art_dir, dir_art, sizeof(dir_art))) {
+            return get_file_art_thumbnail(dir_art, size);
+        }
+    }
+
+    return NULL;
 }

@@ -13,7 +13,7 @@
 #include "settings.h"
 #include "search_history.h"
 #include "library_index.h"
-#include "module_common.h"
+#include "player.h"
 
 static ScrollTextState search_scroll = {0};
 static ScrollTextState search_home_scroll = {0};
@@ -56,10 +56,28 @@ const char* search_home_item_label(int index) {
     }
 }
 
-static SDL_Surface* search_home_icon(int index, bool selected) {
-    switch (search_home_item_type(index)) {
+static SDL_Surface* search_home_history_thumb(int history_index, int icon_size) {
+    SearchHistoryEntry entry;
+    if (!SearchHistory_getEntry(history_index, &entry)) return NULL;
+    if (entry.art_type == SEARCH_HISTORY_ART_NONE || !entry.item_path[0]) return NULL;
+
+    if (entry.art_type == SEARCH_HISTORY_ART_PLAYLIST) {
+        return PlaylistArt_getThumbnail(entry.item_path, icon_size);
+    }
+
+    return TrackArt_getHistoryThumbnail(entry.item_path, entry.art_dir, icon_size);
+}
+
+static SDL_Surface* search_home_icon(int index, bool selected, int icon_size) {
+    SearchHomeItemType type = search_home_item_type(index);
+    switch (type) {
         case SEARCH_HOME_ITEM_SEARCH:
             return Icons_getSearch(selected);
+        case SEARCH_HOME_ITEM_HISTORY:
+            if (Settings_getTooltipArtwork() && icon_size > 0) {
+                return search_home_history_thumb(index - 1, icon_size);
+            }
+            return NULL;
         case SEARCH_HOME_ITEM_CLEAR:
             return Icons_getTrash(selected);
         case SEARCH_HOME_ITEM_REBUILD:
@@ -112,8 +130,9 @@ void render_search_home(SDL_Surface* screen, int show_setting, int selected, int
     int total = search_home_item_count();
     ListLayout layout = calc_list_layout(screen);
     bool use_icons = Icons_isLoaded();
-    int icon_size = use_icons ? SCALE1(24) : 0;
-    int icon_spacing = use_icons ? SCALE1(6) : 0;
+    bool tooltip = Settings_getTooltipArtwork();
+    int icon_size = (use_icons || tooltip) ? SCALE1(24) : 0;
+    int icon_spacing = icon_size ? SCALE1(6) : 0;
     int icon_offset = icon_size + icon_spacing;
 
     char truncated[256];
@@ -124,7 +143,10 @@ void render_search_home(SDL_Surface* screen, int show_setting, int selected, int
         int y = layout.list_y + vis * layout.item_h;
 
         const char* label = search_home_item_label(idx);
-        SDL_Surface* icon = use_icons ? search_home_icon(idx, is_selected) : NULL;
+        SDL_Surface* icon = NULL;
+        if (use_icons || tooltip) {
+            icon = search_home_icon(idx, is_selected, icon_size);
+        }
         bool use_icon_slot = icon != NULL;
         int row_icon_offset = use_icon_slot ? icon_offset : 0;
 
@@ -132,9 +154,19 @@ void render_search_home(SDL_Surface* screen, int show_setting, int selected, int
 
         if (use_icon_slot) {
             int icon_y = y + (layout.item_h - icon_size) / 2;
-            SDL_Rect src = {0, 0, icon->w, icon->h};
-            SDL_Rect dst = {pos.text_x, icon_y, icon_size, icon_size};
-            SDL_BlitScaled(icon, &src, screen, &dst);
+            if (search_home_item_type(idx) == SEARCH_HOME_ITEM_HISTORY && tooltip) {
+                AudioFormat fmt = AUDIO_FORMAT_UNKNOWN;
+                SearchHistoryEntry he;
+                if (SearchHistory_getEntry(idx - 1, &he) &&
+                    he.art_type == SEARCH_HISTORY_ART_TRACK) {
+                    fmt = Player_detectFormat(he.item_path);
+                }
+                render_list_icon(screen, pos.text_x, icon_y, icon_size, icon, fmt, is_selected);
+            } else {
+                SDL_Rect src = {0, 0, icon->w, icon->h};
+                SDL_Rect dst = {pos.text_x, icon_y, icon_size, icon_size};
+                SDL_BlitScaled(icon, &src, screen, &dst);
+            }
         }
 
         int text_x = pos.text_x + (use_icon_slot ? icon_offset : 0);
@@ -172,6 +204,19 @@ bool search_result_at(const SearchResults* results, int flat_index, SearchResult
 
     if (flat_index < results->mixed_count) {
         *out_row = results->mixed[flat_index];
+        return true;
+    }
+    return false;
+}
+
+bool search_results_top_result(const SearchResults* results, SearchResultRow* out_row) {
+    if (!results || !out_row) return false;
+    if (results->nested_count > 0) {
+        *out_row = results->nested[0];
+        return true;
+    }
+    if (results->mixed_count > 0) {
+        *out_row = results->mixed[0];
         return true;
     }
     return false;

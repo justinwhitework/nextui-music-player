@@ -110,9 +110,15 @@ static bool run_search_query(const char* query, SearchState* state,
 
     strncpy(search_query, query, sizeof(search_query) - 1);
     search_query[sizeof(search_query) - 1] = '\0';
-    SearchHistory_add(search_query);
 
     if (LibraryIndex_search(search_query, &search_results)) {
+        SearchResultRow top;
+        const SearchResultRow* top_ptr = NULL;
+        if (search_results_top_result(&search_results, &top)) {
+            top_ptr = &top;
+        }
+        SearchHistory_add(search_query, top_ptr);
+
         *results_selected = results_first_selectable(&search_results);
         *results_scroll = 0;
         *state = SEARCH_STATE_RESULTS;
@@ -411,7 +417,8 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
 
         ModuleCommon_PWR_update(&dirty, &show_setting);
 
-        if ((state == SEARCH_STATE_RESULTS || state == SEARCH_STATE_DETAIL) &&
+        if ((state == SEARCH_STATE_QUERY || state == SEARCH_STATE_RESULTS ||
+             state == SEARCH_STATE_DETAIL) &&
             Settings_getTooltipArtwork()) {
             TrackArt_tick();
             if (TrackArt_hasPendingWork()) dirty = 1;

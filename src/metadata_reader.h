@@ -2,6 +2,7 @@
 #define __METADATA_READER_H__
 
 #include <stdbool.h>
+#include "player.h"
 
 typedef struct {
     char title[256];
@@ -22,5 +23,11 @@ void Metadata_titleFromFilename(const char* filepath, char* title, int title_siz
 
 // Read tags from audio file; missing fields fall back to filename for title.
 void Metadata_readFromFile(const char* filepath, TrackMetadata* out);
+
+// Same as Metadata_readFromFile but skips format detection when fmt is known.
+void Metadata_readFromFileEx(const char* filepath, AudioFormat fmt, TrackMetadata* out);
+
+// Tokenize an already-normalized string (no re-normalization).
+void Metadata_foreachNormalizedToken(const char* norm_text, MetadataTokenFn fn, void* userdata);
 
 #endif

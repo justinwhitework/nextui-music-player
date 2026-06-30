@@ -38,4 +38,6 @@ int search_results_total_count(const SearchResults* results);
 
 bool search_result_at(const SearchResults* results, int flat_index, SearchResultRow* out_row);
 
+bool search_results_top_result(const SearchResults* results, SearchResultRow* out_row);
+
 #endif

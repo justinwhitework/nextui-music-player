@@ -82,6 +82,20 @@ void Metadata_foreachToken(const char* text, MetadataTokenFn fn, void* userdata)
     free(copy);
 }
 
+void Metadata_foreachNormalizedToken(const char* norm_text, MetadataTokenFn fn, void* userdata) {
+    if (!norm_text || !fn || !norm_text[0]) return;
+
+    TokenCtx ctx = {fn, userdata};
+    char copy[512];
+    strncpy(copy, norm_text, sizeof(copy) - 1);
+    copy[sizeof(copy) - 1] = '\0';
+
+    char* save = NULL;
+    for (char* tok = strtok_r(copy, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
+        emit_token(tok, &ctx);
+    }
+}
+
 void Metadata_titleFromFilename(const char* filepath, char* title, int title_size) {
     if (!filepath || !title || title_size <= 0) return;
     const char* slash = strrchr(filepath, '/');
@@ -136,6 +150,10 @@ static void read_id3_text(const uint8_t* frame_data, uint32_t frame_size, char* 
     copy_field(out, out_size, temp);
 }
 
+static bool mp3_core_tags_done(const TrackMetadata* meta) {
+    return meta->title[0] && meta->artist[0] && meta->album[0];
+}
+
 static void parse_mp3_tags(const char* filepath, TrackMetadata* out) {
     FILE* f = fopen(filepath, "rb");
     if (!f) return;
@@ -148,40 +166,49 @@ static void parse_mp3_tags(const char* filepath, TrackMetadata* out) {
 
     uint8_t version_major = header[3];
     uint32_t tag_size = read_syncsafe_int(&header[6]);
-    uint8_t* tag_data = malloc(tag_size);
-    if (!tag_data || fread(tag_data, 1, tag_size, f) != tag_size) {
-        free(tag_data);
+    uint32_t pos = 10;
+    uint32_t end = 10 + tag_size;
+    if (end <= pos) {
         fclose(f);
         return;
     }
-    fclose(f);
 
-    uint32_t pos = 0;
-    while (pos + 10 < tag_size) {
+    while (pos + 10 <= end && !mp3_core_tags_done(out)) {
+        uint8_t frame_hdr[10];
+        if (fseek(f, pos, SEEK_SET) != 0) break;
+        if (fread(frame_hdr, 1, 10, f) != 10) break;
+
         char frame_id[5];
-        memcpy(frame_id, &tag_data[pos], 4);
+        memcpy(frame_id, frame_hdr, 4);
         frame_id[4] = '\0';
         if (frame_id[0] == '\0') break;
 
         uint32_t frame_size = (version_major == 4)
-            ? read_syncsafe_int(&tag_data[pos + 4])
-            : read_be32(&tag_data[pos + 4]);
+            ? read_syncsafe_int(&frame_hdr[4])
+            : read_be32(&frame_hdr[4]);
         pos += 10;
-        if (frame_size == 0 || pos + frame_size > tag_size) break;
+        if (frame_size == 0 || pos + frame_size > end) break;
 
         if (frame_id[0] == 'T') {
-            char temp[256];
-            read_id3_text(&tag_data[pos], frame_size, temp, sizeof(temp));
-            if (strcmp(frame_id, "TIT2") == 0 && temp[0]) copy_field(out->title, sizeof(out->title), temp);
-            else if (strcmp(frame_id, "TPE1") == 0 && temp[0]) copy_field(out->artist, sizeof(out->artist), temp);
-            else if (strcmp(frame_id, "TPE2") == 0 && temp[0] && !out->artist[0])
-                copy_field(out->artist, sizeof(out->artist), temp);
-            else if (strcmp(frame_id, "TALB") == 0 && temp[0]) copy_field(out->album, sizeof(out->album), temp);
-            else if (strcmp(frame_id, "TCON") == 0 && temp[0]) copy_field(out->genre, sizeof(out->genre), temp);
+            uint8_t* frame_data = malloc(frame_size);
+            if (frame_data && fread(frame_data, 1, frame_size, f) == frame_size) {
+                char temp[256];
+                read_id3_text(frame_data, frame_size, temp, sizeof(temp));
+                if (strcmp(frame_id, "TIT2") == 0 && temp[0]) copy_field(out->title, sizeof(out->title), temp);
+                else if (strcmp(frame_id, "TPE1") == 0 && temp[0]) copy_field(out->artist, sizeof(out->artist), temp);
+                else if (strcmp(frame_id, "TPE2") == 0 && temp[0] && !out->artist[0])
+                    copy_field(out->artist, sizeof(out->artist), temp);
+                else if (strcmp(frame_id, "TALB") == 0 && temp[0]) copy_field(out->album, sizeof(out->album), temp);
+                else if (strcmp(frame_id, "TCON") == 0 && temp[0]) copy_field(out->genre, sizeof(out->genre), temp);
+            }
+            free(frame_data);
+        } else if (fseek(f, frame_size, SEEK_CUR) != 0) {
+            break;
         }
+
         pos += frame_size;
     }
-    free(tag_data);
+    fclose(f);
 }
 
 static void parse_vorbis_field(const char* comment, TrackMetadata* out) {
@@ -245,12 +272,15 @@ static void parse_ogg_tags(const char* filepath, TrackMetadata* out) {
     stb_vorbis_close(v);
 }
 
-void Metadata_readFromFile(const char* filepath, TrackMetadata* out) {
+void Metadata_readFromFileEx(const char* filepath, AudioFormat fmt, TrackMetadata* out) {
     if (!filepath || !out) return;
     memset(out, 0, sizeof(*out));
     Metadata_titleFromFilename(filepath, out->title, sizeof(out->title));
 
-    AudioFormat fmt = Player_detectFormat(filepath);
+    if (fmt == AUDIO_FORMAT_UNKNOWN) {
+        fmt = Player_detectFormat(filepath);
+    }
+
     switch (fmt) {
         case AUDIO_FORMAT_MP3:
             parse_mp3_tags(filepath, out);
@@ -277,4 +307,8 @@ void Metadata_readFromFile(const char* filepath, TrackMetadata* out) {
     }
 
     if (!out->title[0]) Metadata_titleFromFilename(filepath, out->title, sizeof(out->title));
+}
+
+void Metadata_readFromFile(const char* filepath, TrackMetadata* out) {
+    Metadata_readFromFileEx(filepath, AUDIO_FORMAT_UNKNOWN, out);
 }

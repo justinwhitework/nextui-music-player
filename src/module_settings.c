@@ -33,11 +33,12 @@ typedef enum {
 #define SETTINGS_ITEM_SOFT_LIMITER  2
 #define SETTINGS_ITEM_PLAYLIST_BG_ART 3
 #define SETTINGS_ITEM_TOOLTIP_ART   4
-#define SETTINGS_ITEM_CLEAR_CACHE   5
-#define SETTINGS_ITEM_REBUILD_INDEX 6
-#define SETTINGS_ITEM_UPDATE_YTDLP  7
-#define SETTINGS_ITEM_ABOUT         8
-#define SETTINGS_ITEM_COUNT         9
+#define SETTINGS_ITEM_FUZZY_SEARCH  5
+#define SETTINGS_ITEM_CLEAR_CACHE   6
+#define SETTINGS_ITEM_REBUILD_INDEX 7
+#define SETTINGS_ITEM_UPDATE_YTDLP  8
+#define SETTINGS_ITEM_ABOUT         9
+#define SETTINGS_ITEM_COUNT         10
 
 // Internal app state constants for controls help
 // These match the pattern used in ui_main.c
@@ -98,6 +99,9 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                     } else if (menu_selected == SETTINGS_ITEM_TOOLTIP_ART) {
                         Settings_toggleTooltipArtwork();
                         dirty = 1;
+                    } else if (menu_selected == SETTINGS_ITEM_FUZZY_SEARCH) {
+                        Settings_toggleFuzzySearch();
+                        dirty = 1;
                     } else {
                         int items_per_page = calc_list_layout(screen).items_per_page;
                         list_page_up(&menu_selected, &menu_scroll, SETTINGS_ITEM_COUNT, items_per_page);
@@ -119,6 +123,9 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                         dirty = 1;
                     } else if (menu_selected == SETTINGS_ITEM_TOOLTIP_ART) {
                         Settings_toggleTooltipArtwork();
+                        dirty = 1;
+                    } else if (menu_selected == SETTINGS_ITEM_FUZZY_SEARCH) {
+                        Settings_toggleFuzzySearch();
                         dirty = 1;
                     } else {
                         int items_per_page = calc_list_layout(screen).items_per_page;
@@ -148,6 +155,10 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                             break;
                         case SETTINGS_ITEM_TOOLTIP_ART:
                             Settings_toggleTooltipArtwork();
+                            dirty = 1;
+                            break;
+                        case SETTINGS_ITEM_FUZZY_SEARCH:
+                            Settings_toggleFuzzySearch();
                             dirty = 1;
                             break;
                         case SETTINGS_ITEM_CLEAR_CACHE:

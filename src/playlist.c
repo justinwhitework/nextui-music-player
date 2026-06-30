@@ -47,6 +47,23 @@ static bool is_audio_file(const char* filename) {
     return fmt != AUDIO_FORMAT_UNKNOWN;
 }
 
+bool Playlist_isIndexSidecar(const char* filename) {
+    if (!filename || !filename[0]) return true;
+
+    size_t len = strlen(filename);
+    if (len > 10 && strcasecmp(filename + len - 10, ".info.json") == 0) return true;
+
+    const char* dot = strrchr(filename, '.');
+    if (!dot || dot == filename) return false;
+
+    if (strcasecmp(dot, ".png") == 0) return true;
+    if (strcasecmp(dot, ".webp") == 0) return true;
+    if (strcasecmp(dot, ".webm") == 0) return true;
+    if (strcasecmp(dot, ".jpg") == 0) return true;
+    if (strcasecmp(dot, ".jpeg") == 0) return true;
+    return false;
+}
+
 // String comparison for qsort (case-insensitive)
 static int compare_strings(const void* a, const void* b) {
     return strcasecmp(*(const char**)a, *(const char**)b);
@@ -345,6 +362,7 @@ static void collect_paths_recursive(const char* path, int depth,
     struct dirent* ent;
     while ((ent = readdir(dir)) != NULL) {
         if (skip_dirent_name(ent->d_name, include_hidden)) continue;
+        if (Playlist_isIndexSidecar(ent->d_name)) continue;
         char full_path[512];
         snprintf(full_path, sizeof(full_path), "%s/%s", path, ent->d_name);
         struct stat st;

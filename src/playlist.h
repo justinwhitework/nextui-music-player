@@ -65,4 +65,7 @@ int Playlist_collectPaths(const char* dir_path, char*** out_paths, int max_count
 int Playlist_collectPathsEx(const char* dir_path, char*** out_paths, int max_count, bool include_hidden);
 void Playlist_freePaths(char** paths, int count);
 
+// Sidecar files from automation (artwork, info json) — skip during library indexing scans.
+bool Playlist_isIndexSidecar(const char* filename);
+
 #endif // __PLAYLIST_H__

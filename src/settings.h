@@ -57,6 +57,11 @@ bool Settings_getTooltipArtwork(void);
 void Settings_toggleTooltipArtwork(void);
 const char* Settings_getTooltipArtworkDisplayStr(void);
 
+// Fuzzy search (prefix + trigram fallback)
+bool Settings_getFuzzySearch(void);
+void Settings_toggleFuzzySearch(void);
+const char* Settings_getFuzzySearchDisplayStr(void);
+
 // Save settings to file (auto-called on change)
 void Settings_save(void);
 

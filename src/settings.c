@@ -30,6 +30,7 @@ static struct {
     int playlist_scan_depth;
     bool playlist_bg_artwork;
     bool tooltip_artwork;
+    bool fuzzy_search;
 } current_settings;
 
 static int clamp_max_playlists(int value) {
@@ -82,6 +83,9 @@ static void apply_config_line(const char* line) {
     if (sscanf(line, "tooltip_artwork=%d", &value) == 1) {
         current_settings.tooltip_artwork = (value != 0);
     }
+    if (sscanf(line, "fuzzy_search=%d", &value) == 1) {
+        current_settings.fuzzy_search = (value != 0);
+    }
 }
 
 static void load_config_file(const char* path) {
@@ -122,6 +126,7 @@ void Settings_init(void) {
     current_settings.playlist_scan_depth = DEFAULT_PLAYLIST_SCAN_DEPTH;
     current_settings.playlist_bg_artwork = false;
     current_settings.tooltip_artwork = false;
+    current_settings.fuzzy_search = true;
 
     load_config_file(SETTINGS_FILE);
     load_config_file(OVERRIDES_FILE);
@@ -183,6 +188,7 @@ void Settings_save(void) {
     fprintf(f, "soft_limiter=%d\n", current_settings.soft_limiter_index);
     fprintf(f, "playlist_bg_artwork=%d\n", current_settings.playlist_bg_artwork ? 1 : 0);
     fprintf(f, "tooltip_artwork=%d\n", current_settings.tooltip_artwork ? 1 : 0);
+    fprintf(f, "fuzzy_search=%d\n", current_settings.fuzzy_search ? 1 : 0);
     fclose(f);
 }
 
@@ -288,4 +294,17 @@ void Settings_toggleTooltipArtwork(void) {
 
 const char* Settings_getTooltipArtworkDisplayStr(void) {
     return current_settings.tooltip_artwork ? "On" : "Off";
+}
+
+bool Settings_getFuzzySearch(void) {
+    return current_settings.fuzzy_search;
+}
+
+void Settings_toggleFuzzySearch(void) {
+    current_settings.fuzzy_search = !current_settings.fuzzy_search;
+    Settings_save();
+}
+
+const char* Settings_getFuzzySearchDisplayStr(void) {
+    return current_settings.fuzzy_search ? "On" : "Off";
 }

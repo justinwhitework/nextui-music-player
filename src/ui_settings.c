@@ -17,11 +17,12 @@
 #define SETTINGS_ITEM_SOFT_LIMITER  2
 #define SETTINGS_ITEM_PLAYLIST_BG_ART 3
 #define SETTINGS_ITEM_TOOLTIP_ART   4
-#define SETTINGS_ITEM_CLEAR_CACHE   5
-#define SETTINGS_ITEM_REBUILD_INDEX 6
-#define SETTINGS_ITEM_UPDATE_YTDLP  7
-#define SETTINGS_ITEM_ABOUT         8
-#define SETTINGS_ITEM_COUNT         9
+#define SETTINGS_ITEM_FUZZY_SEARCH  5
+#define SETTINGS_ITEM_CLEAR_CACHE   6
+#define SETTINGS_ITEM_REBUILD_INDEX 7
+#define SETTINGS_ITEM_UPDATE_YTDLP  8
+#define SETTINGS_ITEM_ABOUT         9
+#define SETTINGS_ITEM_COUNT         10
 
 // Format cache size as human-readable string
 static void format_cache_size(long bytes, char* buf, int buf_size) {
@@ -75,6 +76,10 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
             case SETTINGS_ITEM_TOOLTIP_ART:
                 label = "Tooltip Artwork";
                 value_str = Settings_getTooltipArtworkDisplayStr();
+                break;
+            case SETTINGS_ITEM_FUZZY_SEARCH:
+                label = "Fuzzy Search";
+                value_str = Settings_getFuzzySearchDisplayStr();
                 break;
             case SETTINGS_ITEM_CLEAR_CACHE: {
                 long cache_size = album_art_get_cache_size();
@@ -194,7 +199,8 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
         menu_selected == SETTINGS_ITEM_BASS_FILTER ||
         menu_selected == SETTINGS_ITEM_SOFT_LIMITER ||
         menu_selected == SETTINGS_ITEM_PLAYLIST_BG_ART ||
-        menu_selected == SETTINGS_ITEM_TOOLTIP_ART) {
+        menu_selected == SETTINGS_ITEM_TOOLTIP_ART ||
+        menu_selected == SETTINGS_ITEM_FUZZY_SEARCH) {
         GFX_blitButtonGroup((char*[]){"B", "BACK", "LEFT/RIGHT", "CHANGE", NULL}, 1, screen, 1);
     } else {
         GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "OPEN", NULL}, 1, screen, 1);
