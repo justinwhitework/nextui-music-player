@@ -36,7 +36,8 @@ static void render_library_menu(SDL_Surface* screen, int show_setting, int menu_
         .btn_b_label = "BACK",
         .get_label = NULL,
         .render_badge = NULL,
-        .get_icon = NULL
+        .get_icon = NULL,
+        .footer_buttons = (char*[]){"B", "BACK", "A", "OPEN", "Y", "SEARCH", NULL}
     };
     render_simple_menu(screen, show_setting, menu_selected, &config);
     render_toast(screen, library_toast_message, library_toast_time);
@@ -110,6 +111,13 @@ ModuleExitReason LibraryModule_run(SDL_Surface* screen) {
             }
 
             // Sub-module returned to library menu
+            dirty = 1;
+        }
+        else if (PAD_justPressed(BTN_Y)) {
+            ModuleExitReason reason = SearchModule_run(screen);
+            if (reason == MODULE_EXIT_QUIT) {
+                return MODULE_EXIT_QUIT;
+            }
             dirty = 1;
         }
         else if (PAD_justPressed(BTN_B)) {

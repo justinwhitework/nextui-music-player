@@ -26,6 +26,10 @@ SDL_Surface* Icons_getDownload(bool selected);
 // Empty state icon
 SDL_Surface* Icons_getEmpty(bool selected);
 
+SDL_Surface* Icons_getSearch(bool selected);
+SDL_Surface* Icons_getTrash(bool selected);
+SDL_Surface* Icons_getIndex(bool selected);
+
 // Check if icons are loaded
 bool Icons_isLoaded(void);
 

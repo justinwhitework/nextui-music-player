@@ -23,6 +23,9 @@
 #define ICON_COMPLETE      ICON_PATH "/icon-complete.png"
 #define ICON_DOWNLOAD      ICON_PATH "/icon-download.png"
 #define ICON_EMPTY         ICON_PATH "/icon-empty.png"
+#define ICON_SEARCH        ICON_PATH "/icon-search.png"
+#define ICON_TRASH         ICON_PATH "/icon-trash.png"
+#define ICON_INDEX         ICON_PATH "/icon-index.png"
 
 // Icon storage - original (black) and inverted (white) versions
 typedef struct {
@@ -53,6 +56,12 @@ typedef struct {
     SDL_Surface* download_inv;
     SDL_Surface* empty;
     SDL_Surface* empty_inv;
+    SDL_Surface* search;
+    SDL_Surface* search_inv;
+    SDL_Surface* trash;
+    SDL_Surface* trash_inv;
+    SDL_Surface* index;
+    SDL_Surface* index_inv;
     bool loaded;
 } IconSet;
 
@@ -129,6 +138,9 @@ void Icons_init(void) {
     load_icon_pair(ICON_COMPLETE, &icons.complete, &icons.complete_inv);
     load_icon_pair(ICON_DOWNLOAD, &icons.download, &icons.download_inv);
     load_icon_pair(ICON_EMPTY, &icons.empty, &icons.empty_inv);
+    load_icon_pair(ICON_SEARCH, &icons.search, &icons.search_inv);
+    load_icon_pair(ICON_TRASH, &icons.trash, &icons.trash_inv);
+    load_icon_pair(ICON_INDEX, &icons.index, &icons.index_inv);
 
     // Consider loaded if at least folder icon exists
     icons.loaded = (icons.folder != NULL);
@@ -166,6 +178,12 @@ void Icons_quit(void) {
     if (icons.download_inv) { SDL_FreeSurface(icons.download_inv); icons.download_inv = NULL; }
     if (icons.empty) { SDL_FreeSurface(icons.empty); icons.empty = NULL; }
     if (icons.empty_inv) { SDL_FreeSurface(icons.empty_inv); icons.empty_inv = NULL; }
+    if (icons.search) { SDL_FreeSurface(icons.search); icons.search = NULL; }
+    if (icons.search_inv) { SDL_FreeSurface(icons.search_inv); icons.search_inv = NULL; }
+    if (icons.trash) { SDL_FreeSurface(icons.trash); icons.trash = NULL; }
+    if (icons.trash_inv) { SDL_FreeSurface(icons.trash_inv); icons.trash_inv = NULL; }
+    if (icons.index) { SDL_FreeSurface(icons.index); icons.index = NULL; }
+    if (icons.index_inv) { SDL_FreeSurface(icons.index_inv); icons.index_inv = NULL; }
     icons.loaded = false;
 }
 
@@ -260,4 +278,19 @@ SDL_Surface* Icons_getDownload(bool selected) {
 SDL_Surface* Icons_getEmpty(bool selected) {
     if (!icons.loaded) return NULL;
     return selected ? icons.empty : icons.empty_inv;
+}
+
+SDL_Surface* Icons_getSearch(bool selected) {
+    if (!icons.loaded) return NULL;
+    return selected ? icons.search : icons.search_inv;
+}
+
+SDL_Surface* Icons_getTrash(bool selected) {
+    if (!icons.loaded) return NULL;
+    return selected ? icons.trash : icons.trash_inv;
+}
+
+SDL_Surface* Icons_getIndex(bool selected) {
+    if (!icons.loaded) return NULL;
+    return selected ? icons.index : icons.index_inv;
 }

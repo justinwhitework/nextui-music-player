@@ -145,7 +145,8 @@ void render_menu(SDL_Surface* screen, int show_setting, int menu_selected,
         .get_label = main_menu_get_label,
         .render_badge = NULL,
         .get_icon = NULL,
-        .render_text = main_menu_render_text
+        .render_text = main_menu_render_text,
+        .footer_buttons = (char*[]){"B", "EXIT", "A", "OPEN", "Y", "SEARCH", NULL}
     };
     render_simple_menu(screen, show_setting, menu_selected, &config);
 
@@ -163,6 +164,7 @@ typedef struct {
 static const ControlHelp main_menu_controls[] = {
     {"Up/Down", "Navigate"},
     {"Left/Right", "Navigate"},
+    {"Y", "Search Library"},
     {"X", "Clear History/Playback"},
     {"B (double)", "Exit App"},
     {"Start (hold)", "Exit App"},

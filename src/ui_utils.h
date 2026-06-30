@@ -212,6 +212,7 @@ typedef struct {
     MenuItemBadgeCallback render_badge;   // Optional: render right-side badge
     MenuItemIconCallback get_icon;        // Optional: get icon for item
     MenuItemCustomTextCallback render_text; // Optional: custom text rendering
+    char** footer_buttons;                // Optional: replaces default B/A footer row
 } SimpleMenuConfig;
 
 // Render a simple menu with optional customization callbacks

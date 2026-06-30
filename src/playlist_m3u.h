@@ -26,6 +26,7 @@ int M3U_listDirectory(const char* dir, PlaylistInfo* out, int max, int max_scan_
 
 // Recursively collect all playlists up to max_scan_depth folder nesting.
 int M3U_listAllPlaylists(PlaylistInfo* out, int max, int max_scan_depth);
+int M3U_listAllPlaylistsEx(PlaylistInfo* out, int max, int max_scan_depth, bool include_hidden);
 
 // For Add-to-Playlist: flat list, root playlists first, then nested by path.
 int M3U_listPlaylistsForPicker(PlaylistInfo* out, int max, int max_scan_depth);

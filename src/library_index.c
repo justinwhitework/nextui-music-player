@@ -105,13 +105,20 @@ static void update_fp(LibraryFingerprint* fp, const char* path) {
     }
 }
 
+static bool skip_dirent_name(const char* name, bool include_hidden) {
+    if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
+        return true;
+    }
+    return !include_hidden && name[0] == '.';
+}
+
 static void scan_fp_dir(const char* dir, LibraryFingerprint* fp, bool playlists_only) {
     DIR* d = opendir(dir);
     if (!d) return;
 
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+        if (skip_dirent_name(ent->d_name, true)) continue;
 
         char full[768];
         snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
@@ -407,6 +414,7 @@ static bool load_json_index(const char* expected_fp) {
             }
             token_count++;
         }
+        token_cap = token_count;
     }
 
     strncpy(saved_fingerprint, expected_fp, sizeof(saved_fingerprint) - 1);
@@ -490,7 +498,7 @@ static void rebuild_index(const char* fp_str) {
     set_status("Scanning music...");
   {
         char** paths = NULL;
-        int count = Playlist_collectPaths(MUSIC_PATH, &paths, LIBRARY_MAX_TRACKS);
+        int count = Playlist_collectPathsEx(MUSIC_PATH, &paths, LIBRARY_MAX_TRACKS, true);
         if (count > 0 && paths) {
             tracks = calloc(count, sizeof(IndexedTrack));
             if (tracks) {
@@ -524,7 +532,7 @@ static void rebuild_index(const char* fp_str) {
         int limit = Settings_getMaxPlaylists();
         PlaylistInfo* infos = calloc(limit, sizeof(PlaylistInfo));
         if (infos) {
-            int n = M3U_listAllPlaylists(infos, limit, Settings_getPlaylistScanDepth());
+            int n = M3U_listAllPlaylistsEx(infos, limit, Settings_getPlaylistScanDepth(), true);
             if (n > 0) {
                 playlists = calloc(n, sizeof(IndexedPlaylist));
                 if (playlists) {

@@ -62,6 +62,7 @@ bool Playlist_isActive(const PlaylistContext* ctx);
 // Returns the count; *out_paths is a malloc'd array of strdup'd path strings.
 // Caller must free with Playlist_freePaths(paths, count).
 int Playlist_collectPaths(const char* dir_path, char*** out_paths, int max_count);
+int Playlist_collectPathsEx(const char* dir_path, char*** out_paths, int max_count, bool include_hidden);
 void Playlist_freePaths(char** paths, int count);
 
 #endif // __PLAYLIST_H__

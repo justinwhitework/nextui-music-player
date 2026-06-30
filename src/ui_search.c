@@ -11,10 +11,63 @@
 #include "playlist_art.h"
 #include "track_art.h"
 #include "settings.h"
+#include "search_history.h"
+#include "library_index.h"
 #include "module_common.h"
 
 static ScrollTextState search_scroll = {0};
+static ScrollTextState search_home_scroll = {0};
 static ScrollTextState search_detail_scroll = {0};
+
+int search_home_item_count(void) {
+    return 3 + SearchHistory_count();
+}
+
+SearchHomeItemType search_home_item_type(int index) {
+    if (index == 0) return SEARCH_HOME_ITEM_SEARCH;
+    int hc = SearchHistory_count();
+    if (index >= 1 && index <= hc) return SEARCH_HOME_ITEM_HISTORY;
+    if (index == 1 + hc) return SEARCH_HOME_ITEM_CLEAR;
+    return SEARCH_HOME_ITEM_REBUILD;
+}
+
+const char* search_home_item_label(int index) {
+    static char rebuild_label[64];
+    SearchHomeItemType type = search_home_item_type(index);
+
+    switch (type) {
+        case SEARCH_HOME_ITEM_SEARCH:
+            return "Search";
+        case SEARCH_HOME_ITEM_HISTORY: {
+            int hi = index - 1;
+            const char* q = SearchHistory_get(hi);
+            return q ? q : "";
+        }
+        case SEARCH_HOME_ITEM_CLEAR:
+            return "Clear history";
+        case SEARCH_HOME_ITEM_REBUILD:
+            if (LibraryIndex_isBuilding()) {
+                snprintf(rebuild_label, sizeof(rebuild_label), "Rebuild Index...");
+                return rebuild_label;
+            }
+            return "Rebuild Index";
+        default:
+            return "";
+    }
+}
+
+static SDL_Surface* search_home_icon(int index, bool selected) {
+    switch (search_home_item_type(index)) {
+        case SEARCH_HOME_ITEM_SEARCH:
+            return Icons_getSearch(selected);
+        case SEARCH_HOME_ITEM_CLEAR:
+            return Icons_getTrash(selected);
+        case SEARCH_HOME_ITEM_REBUILD:
+            return Icons_getIndex(selected);
+        default:
+            return NULL;
+    }
+}
 
 void render_search_building(SDL_Surface* screen, int show_setting, const char* status) {
     GFX_clear(screen);
@@ -34,35 +87,67 @@ void render_search_building(SDL_Surface* screen, int show_setting, const char* s
     GFX_blitButtonGroup((char*[]){"B", "BACK", NULL}, 1, screen, 1);
 }
 
-void render_search_query(SDL_Surface* screen, int show_setting, const char* query) {
+void render_search_rebuilding(SDL_Surface* screen, int show_setting, const char* status) {
     GFX_clear(screen);
-    render_screen_header(screen, "Library Search", show_setting);
+    render_screen_header(screen, "Rebuild Search Index", show_setting);
 
-    const char* prompt = "Press A to search your library";
-    SDL_Surface* hint = TTF_RenderUTF8_Blended(Fonts_getMedium(), prompt, COLOR_WHITE);
-    if (hint) {
-        SDL_BlitSurface(hint, NULL, screen, &(SDL_Rect){
-            (screen->w - hint->w) / 2,
-            screen->h / 2 - SCALE1(12)
+    const char* msg = (status && status[0]) ? status : "Rebuilding index...";
+    SDL_Surface* text = TTF_RenderUTF8_Blended(Fonts_getMedium(), msg, COLOR_WHITE);
+    if (text) {
+        SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
+            (screen->w - text->w) / 2,
+            screen->h / 2 - text->h / 2
         });
-        SDL_FreeSurface(hint);
-    }
-
-    if (query && query[0]) {
-        char line[300];
-        snprintf(line, sizeof(line), "Last: %s", query);
-        SDL_Surface* last = TTF_RenderUTF8_Blended(Fonts_getSmall(), line, COLOR_GRAY);
-        if (last) {
-            SDL_BlitSurface(last, NULL, screen, &(SDL_Rect){
-                (screen->w - last->w) / 2,
-                screen->h / 2 + SCALE1(4)
-            });
-            SDL_FreeSurface(last);
-        }
+        SDL_FreeSurface(text);
     }
 
     GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "SEARCH", NULL}, 1, screen, 1);
+    GFX_blitButtonGroup((char*[]){"B", "BACK", NULL}, 1, screen, 1);
+}
+
+void render_search_home(SDL_Surface* screen, int show_setting, int selected, int scroll) {
+    GFX_clear(screen);
+    render_screen_header(screen, "Library Search", show_setting);
+
+    int total = search_home_item_count();
+    ListLayout layout = calc_list_layout(screen);
+    bool use_icons = Icons_isLoaded();
+    int icon_size = use_icons ? SCALE1(24) : 0;
+    int icon_spacing = use_icons ? SCALE1(6) : 0;
+    int icon_offset = icon_size + icon_spacing;
+
+    char truncated[256];
+
+    for (int vis = 0; vis < layout.items_per_page && (scroll + vis) < total; vis++) {
+        int idx = scroll + vis;
+        bool is_selected = (idx == selected);
+        int y = layout.list_y + vis * layout.item_h;
+
+        const char* label = search_home_item_label(idx);
+        SDL_Surface* icon = use_icons ? search_home_icon(idx, is_selected) : NULL;
+        bool use_icon_slot = icon != NULL;
+        int row_icon_offset = use_icon_slot ? icon_offset : 0;
+
+        ListItemPos pos = render_list_item_pill(screen, &layout, label, truncated, y, is_selected, row_icon_offset);
+
+        if (use_icon_slot) {
+            int icon_y = y + (layout.item_h - icon_size) / 2;
+            SDL_Rect src = {0, 0, icon->w, icon->h};
+            SDL_Rect dst = {pos.text_x, icon_y, icon_size, icon_size};
+            SDL_BlitScaled(icon, &src, screen, &dst);
+        }
+
+        int text_x = pos.text_x + (use_icon_slot ? icon_offset : 0);
+        int available_width = pos.pill_width - SCALE1(BUTTON_PADDING * 2);
+        if (use_icon_slot) available_width -= icon_offset;
+
+        render_list_item_text(screen, &search_home_scroll, label, Fonts_getMedium(),
+                              text_x, pos.text_y, available_width, is_selected);
+    }
+
+    render_scroll_indicators(screen, scroll, layout.items_per_page, total);
+    GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
+    GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "SELECT", "Y", "SEARCH", NULL}, 1, screen, 1);
 }
 
 int search_results_total_count(const SearchResults* results) {
@@ -114,7 +199,7 @@ void render_search_results(SDL_Surface* screen, int show_setting,
     if (total == 0) {
         render_empty_state(screen, "No matches", "Try a different search term", NULL);
         GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-        GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "SEARCH", NULL}, 1, screen, 1);
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "SEARCH", NULL}, 1, screen, 1);
         return;
     }
 
@@ -125,7 +210,7 @@ void render_search_results(SDL_Surface* screen, int show_setting,
     int icon_offset = icon_size + icon_spacing;
 
     char truncated[256];
-    int row = 0;
+
     for (int i = 0; i < layout.items_per_page && (scroll + i) < total; i++) {
         int idx = scroll + i;
         bool is_selected = (idx == selected);
@@ -145,8 +230,7 @@ void render_search_results(SDL_Surface* screen, int show_setting,
         SearchResultRow item;
         if (!search_result_at(results, idx, &item)) continue;
 
-        bool is_playlist = (item.type != SEARCH_ITEM_TRACK);
-        bool use_icon_slot = Icons_isLoaded() && (is_playlist ? tooltip : tooltip);
+        bool use_icon_slot = Icons_isLoaded() && tooltip;
         int row_icon_offset = use_icon_slot ? icon_offset : 0;
 
         char display[300];
@@ -163,6 +247,7 @@ void render_search_results(SDL_Surface* screen, int show_setting,
             int icon_x = pos.text_x;
             SDL_Surface* thumb = NULL;
             if (item.type == SEARCH_ITEM_TRACK) {
+                TrackArt_request(item.path);
                 thumb = TrackArt_getThumbnail(item.path, icon_size);
             } else {
                 thumb = PlaylistArt_getThumbnail(item.path, icon_size);
@@ -178,12 +263,20 @@ void render_search_results(SDL_Surface* screen, int show_setting,
 
         render_list_item_text(screen, &search_scroll, display, Fonts_getMedium(),
                               text_x, pos.text_y, available_width, is_selected);
-        row++;
     }
 
     render_scroll_indicators(screen, scroll, layout.items_per_page, total);
+
+    SearchResultRow selected_row;
+    bool have_row = search_result_at(results, selected, &selected_row);
+    bool selected_is_track = have_row && selected_row.type == SEARCH_ITEM_TRACK;
+
     GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "SELECT", "Y", "SEARCH", NULL}, 1, screen, 1);
+    if (selected_is_track) {
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "PLAY", "Y", "SEARCH", NULL}, 1, screen, 1);
+    } else {
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "OPEN", "Y", "SEARCH", NULL}, 1, screen, 1);
+    }
 }
 
 void render_search_detail(SDL_Surface* screen, int show_setting,
@@ -207,7 +300,7 @@ void render_search_detail(SDL_Surface* screen, int show_setting,
 
     if (count == 0) {
         render_empty_state(screen, "No tracks", NULL, NULL);
-        GFX_blitButtonGroup((char*[]){"B", "BACK", NULL}, 1, screen, 1);
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "SEARCH", NULL}, 1, screen, 1);
         return;
     }
 
@@ -230,6 +323,7 @@ void render_search_detail(SDL_Surface* screen, int show_setting,
 
         if (use_icon_slot) {
             int icon_y = y + (layout.item_h - icon_size) / 2;
+            TrackArt_request(tr->path);
             SDL_Surface* thumb = TrackArt_getThumbnail(tr->path, icon_size);
             render_list_icon(screen, pos.text_x, icon_y, icon_size, thumb, tr->format, is_selected);
         }
@@ -244,5 +338,5 @@ void render_search_detail(SDL_Surface* screen, int show_setting,
 
     render_scroll_indicators(screen, scroll, layout.items_per_page, count);
     GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "PLAY", NULL}, 1, screen, 1);
+    GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "PLAY", "Y", "SEARCH", NULL}, 1, screen, 1);
 }

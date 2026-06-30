@@ -239,9 +239,8 @@ static void parse_ogg_tags(const char* filepath, TrackMetadata* out) {
 
     stb_vorbis_comment comments = stb_vorbis_get_comment(v);
     for (int i = 0; i < comments.comment_list_length; i++) {
-        if (comments.comment_list[i]) {
-            parse_vorbis_field(comments.comment_list[i], out);
-        }
+        const char* comment = comments.comment_list[i];
+        if (comment) parse_vorbis_field(comment, out);
     }
     stb_vorbis_close(v);
 }

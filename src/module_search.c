@@ -12,14 +12,18 @@
 #include "playlist.h"
 #include "keyboard.h"
 #include "display_helper.h"
+#include "search_history.h"
 #include "ui_search.h"
 #include "ui_utils.h"
+#include "settings.h"
+#include "track_art.h"
 
 typedef enum {
     SEARCH_STATE_BUILDING,
     SEARCH_STATE_QUERY,
     SEARCH_STATE_RESULTS,
-    SEARCH_STATE_DETAIL
+    SEARCH_STATE_DETAIL,
+    SEARCH_STATE_REBUILDING
 } SearchState;
 
 #define SEARCH_BUILD_HELP  56
@@ -100,6 +104,25 @@ static void open_keyboard(SDL_Surface** screen, char* out_query, int out_size) {
     if (result) free(result);
 }
 
+static bool run_search_query(const char* query, SearchState* state,
+                             int* results_selected, int* results_scroll) {
+    if (!query || !query[0]) return false;
+
+    strncpy(search_query, query, sizeof(search_query) - 1);
+    search_query[sizeof(search_query) - 1] = '\0';
+    SearchHistory_add(search_query);
+
+    if (LibraryIndex_search(search_query, &search_results)) {
+        *results_selected = results_first_selectable(&search_results);
+        *results_scroll = 0;
+        *state = SEARCH_STATE_RESULTS;
+        return true;
+    }
+
+    show_toast("No matches found");
+    return false;
+}
+
 static void load_detail_from_row(const SearchResultRow* row) {
     detail_track_count = 0;
     detail_selected = 0;
@@ -125,28 +148,110 @@ static void load_detail_from_row(const SearchResultRow* row) {
     M3U_loadTracks(row->path, detail_tracks, PLAYLIST_MAX_TRACKS, &detail_track_count);
 }
 
+static void go_search_home(SearchState* state, int* home_selected, int* home_scroll) {
+    *state = SEARCH_STATE_QUERY;
+    *home_selected = 0;
+    *home_scroll = 0;
+}
+
+static ModuleExitReason play_track_from_row(SDL_Surface** screen, const SearchResultRow* row) {
+    if (!row || row->type != SEARCH_ITEM_TRACK) return MODULE_EXIT_TO_MENU;
+
+    PlaylistTrack tracks[1];
+    memset(tracks, 0, sizeof(tracks));
+    strncpy(tracks[0].path, row->path, sizeof(tracks[0].path) - 1);
+    strncpy(tracks[0].name, row->label, sizeof(tracks[0].name) - 1);
+    tracks[0].format = row->format;
+
+    PlayerModule_setResumePlaylistPath(NULL);
+    ModuleExitReason reason = PlayerModule_runWithPlaylist(*screen, tracks, 1, 0);
+    {
+        SDL_Surface* ns = DisplayHelper_getReinitScreen();
+        if (ns) *screen = ns;
+    }
+    return reason;
+}
+
+static void activate_home_row(SDL_Surface** screen, int index, SearchState* state,
+                              int* home_selected, int* home_scroll,
+                              int* results_selected, int* results_scroll,
+                              bool* show_clear_confirm) {
+    switch (search_home_item_type(index)) {
+        case SEARCH_HOME_ITEM_SEARCH:
+            open_keyboard(screen, search_query, sizeof(search_query));
+            run_search_query(search_query, state, results_selected, results_scroll);
+            break;
+        case SEARCH_HOME_ITEM_HISTORY: {
+            const char* q = SearchHistory_get(index - 1);
+            if (q) run_search_query(q, state, results_selected, results_scroll);
+            break;
+        }
+        case SEARCH_HOME_ITEM_CLEAR:
+            *show_clear_confirm = true;
+            break;
+        case SEARCH_HOME_ITEM_REBUILD:
+            if (LibraryIndex_requestRebuild()) {
+                *state = SEARCH_STATE_REBUILDING;
+            } else {
+                show_toast("Index rebuild already running");
+            }
+            break;
+    }
+    (void)home_selected;
+    (void)home_scroll;
+}
+
 ModuleExitReason SearchModule_run(SDL_Surface* screen) {
     Keyboard_init();
     M3U_init();
+    SearchHistory_init();
 
     SearchState state = LibraryIndex_isReady() ? SEARCH_STATE_QUERY : SEARCH_STATE_BUILDING;
     int dirty = 1;
     int show_setting = 0;
+    int home_selected = 0;
+    int home_scroll = 0;
     int results_selected = 0;
     int results_scroll = 0;
+    bool show_clear_confirm = false;
 
     memset(&search_results, 0, sizeof(search_results));
     search_toast[0] = '\0';
+    search_query[0] = '\0';
 
     while (1) {
         GFX_startFrame();
         PAD_poll();
+
+        if (show_clear_confirm) {
+            if (PAD_justPressed(BTN_A)) {
+                SearchHistory_clear();
+                if (home_selected >= search_home_item_count()) {
+                    home_selected = search_home_item_count() - 1;
+                }
+                if (home_selected < 0) home_selected = 0;
+                show_clear_confirm = false;
+                dirty = 1;
+                continue;
+            }
+            if (PAD_justPressed(BTN_B)) {
+                show_clear_confirm = false;
+                dirty = 1;
+                continue;
+            }
+            render_search_home(screen, show_setting, home_selected, home_scroll);
+            render_confirmation_dialog(screen, NULL, "Clear search history?");
+            GFX_flip(screen);
+            GFX_sync();
+            continue;
+        }
 
         int help_state;
         switch (state) {
             case SEARCH_STATE_BUILDING: help_state = SEARCH_BUILD_HELP; break;
             case SEARCH_STATE_QUERY: help_state = SEARCH_QUERY_HELP; break;
             case SEARCH_STATE_RESULTS: help_state = SEARCH_RESULTS_HELP; break;
+            case SEARCH_STATE_REBUILDING: help_state = SEARCH_QUERY_HELP; break;
             default: help_state = SEARCH_DETAIL_HELP; break;
         }
 
@@ -166,18 +271,46 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
             }
             if (PAD_justPressed(BTN_B)) return MODULE_EXIT_TO_MENU;
         }
+        else if (state == SEARCH_STATE_REBUILDING) {
+            dirty = 1;
+            if (LibraryIndex_isReady() && !LibraryIndex_isBuilding()) {
+                state = SEARCH_STATE_QUERY;
+                show_toast("Index rebuild complete");
+                dirty = 1;
+            }
+            if (PAD_justPressed(BTN_B)) {
+                state = SEARCH_STATE_QUERY;
+                dirty = 1;
+            }
+        }
         else if (state == SEARCH_STATE_QUERY) {
-            if (PAD_justPressed(BTN_A)) {
+            int total = search_home_item_count();
+            int items_per_page = calc_list_layout(screen).items_per_page;
+
+            if (PAD_justRepeated(BTN_UP) && total > 0) {
+                home_selected = (home_selected > 0) ? home_selected - 1 : total - 1;
+                dirty = 1;
+            }
+            else if (PAD_justRepeated(BTN_DOWN) && total > 0) {
+                home_selected = (home_selected < total - 1) ? home_selected + 1 : 0;
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_LEFT)) {
+                if (list_page_up(&home_selected, &home_scroll, total, items_per_page))
+                    dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_RIGHT)) {
+                if (list_page_down(&home_selected, &home_scroll, total, items_per_page))
+                    dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_A) && total > 0) {
+                activate_home_row(&screen, home_selected, &state, &home_selected, &home_scroll,
+                                  &results_selected, &results_scroll, &show_clear_confirm);
+                dirty = 1;
+            }
+            else if (PAD_justPressed(BTN_Y)) {
                 open_keyboard(&screen, search_query, sizeof(search_query));
-                if (search_query[0]) {
-                    if (LibraryIndex_search(search_query, &search_results)) {
-                        results_selected = results_first_selectable(&search_results);
-                        results_scroll = 0;
-                        state = SEARCH_STATE_RESULTS;
-                    } else {
-                        show_toast("No matches found");
-                    }
-                }
+                run_search_query(search_query, &state, &results_selected, &results_scroll);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_B)) {
@@ -209,29 +342,26 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 }
             }
             else if (PAD_justPressed(BTN_Y)) {
-                open_keyboard(&screen, search_query, sizeof(search_query));
-                if (search_query[0]) {
-                    if (LibraryIndex_search(search_query, &search_results)) {
-                        results_selected = results_first_selectable(&search_results);
-                        results_scroll = 0;
-                    } else {
-                        show_toast("No matches found");
-                    }
-                }
+                go_search_home(&state, &home_selected, &home_scroll);
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_A) && total > 0) {
                 if (!results_index_is_header(&search_results, results_selected)) {
                     SearchResultRow row;
                     if (search_result_at(&search_results, results_selected, &row)) {
-                        load_detail_from_row(&row);
-                        state = SEARCH_STATE_DETAIL;
+                        if (row.type == SEARCH_ITEM_TRACK) {
+                            ModuleExitReason reason = play_track_from_row(&screen, &row);
+                            if (reason == MODULE_EXIT_QUIT) return MODULE_EXIT_QUIT;
+                        } else {
+                            load_detail_from_row(&row);
+                            state = SEARCH_STATE_DETAIL;
+                        }
                         dirty = 1;
                     }
                 }
             }
             else if (PAD_justPressed(BTN_B)) {
-                state = SEARCH_STATE_QUERY;
+                go_search_home(&state, &home_selected, &home_scroll);
                 dirty = 1;
             }
         }
@@ -254,6 +384,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 if (list_page_down(&detail_selected, &detail_scroll, detail_track_count, items_per_page))
                     dirty = 1;
             }
+            else if (PAD_justPressed(BTN_Y)) {
+                go_search_home(&state, &home_selected, &home_scroll);
+                dirty = 1;
+            }
             else if (PAD_justPressed(BTN_A) && detail_track_count > 0) {
                 if (!detail_is_single_track && detail_m3u_path[0]) {
                     PlayerModule_setResumePlaylistPath(detail_m3u_path);
@@ -263,6 +397,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 ModuleExitReason reason = PlayerModule_runWithPlaylist(
                     screen, detail_tracks, detail_track_count, detail_selected);
                 if (reason == MODULE_EXIT_QUIT) return MODULE_EXIT_QUIT;
+                {
+                    SDL_Surface* ns = DisplayHelper_getReinitScreen();
+                    if (ns) screen = ns;
+                }
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_B)) {
@@ -273,14 +411,23 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
 
         ModuleCommon_PWR_update(&dirty, &show_setting);
 
+        if ((state == SEARCH_STATE_RESULTS || state == SEARCH_STATE_DETAIL) &&
+            Settings_getTooltipArtwork()) {
+            TrackArt_tick();
+            if (TrackArt_hasPendingWork()) dirty = 1;
+        }
+
         if (dirty) {
             switch (state) {
                 case SEARCH_STATE_BUILDING:
                     render_search_building(screen, show_setting, LibraryIndex_getBuildStatus());
                     break;
-                case SEARCH_STATE_QUERY:
-                    render_search_query(screen, show_setting, search_query);
+                case SEARCH_STATE_QUERY: {
+                    int items_per_page = calc_list_layout(screen).items_per_page;
+                    adjust_list_scroll(home_selected, &home_scroll, items_per_page);
+                    render_search_home(screen, show_setting, home_selected, home_scroll);
                     break;
+                }
                 case SEARCH_STATE_RESULTS: {
                     int items_per_page = calc_list_layout(screen).items_per_page;
                     adjust_list_scroll(results_selected, &results_scroll, items_per_page);
@@ -297,6 +444,9 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                                          detail_selected, detail_scroll);
                     break;
                 }
+                case SEARCH_STATE_REBUILDING:
+                    render_search_rebuilding(screen, show_setting, LibraryIndex_getBuildStatus());
+                    break;
             }
 
             if (show_setting) GFX_blitHardwareHints(screen, show_setting);
