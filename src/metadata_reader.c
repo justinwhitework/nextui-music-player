@@ -232,10 +232,11 @@ static void parse_ogg_tags(const char* filepath, TrackMetadata* out) {
     stb_vorbis* v = stb_vorbis_open_filename(filepath, &error, NULL);
     if (!v) return;
 
-    int count = stb_vorbis_get_comment_count(v);
-    for (int i = 0; i < count; i++) {
-        const char* comment = stb_vorbis_get_comment(v, i);
-        if (comment) parse_vorbis_field(comment, out);
+    stb_vorbis_comment comments = stb_vorbis_get_comment(v);
+    for (int i = 0; i < comments.comment_list_length; i++) {
+        if (comments.comment_list[i]) {
+            parse_vorbis_field(comments.comment_list[i], out);
+        }
     }
     stb_vorbis_close(v);
 }
