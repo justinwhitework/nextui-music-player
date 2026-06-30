@@ -233,7 +233,7 @@ static void collect_root_playlists(PlaylistInfo* out, int max, int* count) {
     closedir(d);
 }
 
-static bool is_root_playlist_path(const char* m3u_path) {
+bool M3U_isRootPlaylist(const char* m3u_path) {
     if (!m3u_path) return false;
 
     const char* slash = strrchr(m3u_path, '/');
@@ -246,6 +246,26 @@ static bool is_root_playlist_path(const char* m3u_path) {
     memcpy(dir, m3u_path, dir_len);
     dir[dir_len] = '\0';
     return M3U_isPlaylistsRoot(dir);
+}
+
+void M3U_getPlaylistParentFolder(const char* m3u_path, char* out, int out_size) {
+    if (!out || out_size <= 0) return;
+    out[0] = '\0';
+    if (!m3u_path || M3U_isRootPlaylist(m3u_path)) return;
+
+    const char* rel = m3u_path;
+    if (strncmp(rel, PLAYLISTS_DIR, strlen(PLAYLISTS_DIR)) == 0) {
+        rel += strlen(PLAYLISTS_DIR);
+        if (*rel == '/') rel++;
+    }
+
+    const char* slash = strrchr(rel, '/');
+    if (!slash || slash == rel) return;
+
+    size_t len = (size_t)(slash - rel);
+    if (len >= (size_t)out_size) len = (size_t)out_size - 1;
+    memcpy(out, rel, len);
+    out[len] = '\0';
 }
 
 static int compare_picker_entries(const void* a, const void* b) {
@@ -298,7 +318,7 @@ int M3U_listPlaylistsForPicker(PlaylistInfo* out, int max, int max_scan_depth) {
 void M3U_formatPickerLabel(const PlaylistInfo* info, char* out, int out_size) {
     if (!info || !out || out_size <= 0) return;
 
-    if (is_root_playlist_path(info->path)) {
+    if (M3U_isRootPlaylist(info->path)) {
         snprintf(out, out_size, "%s (%d)", info->name, info->track_count);
         return;
     }
