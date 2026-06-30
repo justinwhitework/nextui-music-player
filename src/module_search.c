@@ -281,16 +281,22 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 case SEARCH_STATE_QUERY:
                     render_search_query(screen, show_setting, search_query);
                     break;
-                case SEARCH_STATE_RESULTS:
+                case SEARCH_STATE_RESULTS: {
+                    int items_per_page = calc_list_layout(screen).items_per_page;
+                    adjust_list_scroll(results_selected, &results_scroll, items_per_page);
                     render_search_results(screen, show_setting, search_query,
                                           &search_results, results_selected, results_scroll);
                     break;
-                case SEARCH_STATE_DETAIL:
+                }
+                case SEARCH_STATE_DETAIL: {
+                    int items_per_page = calc_list_layout(screen).items_per_page;
+                    adjust_list_scroll(detail_selected, &detail_scroll, items_per_page);
                     render_search_detail(screen, show_setting, detail_title,
                                          detail_m3u_path[0] ? detail_m3u_path : NULL,
                                          detail_tracks, detail_track_count,
                                          detail_selected, detail_scroll);
                     break;
+                }
             }
 
             if (show_setting) GFX_blitHardwareHints(screen, show_setting);
