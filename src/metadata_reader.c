@@ -8,6 +8,7 @@
 #include <ctype.h>
 
 #include "audio/dr_flac.h"
+#define STB_VORBIS_HEADER_ONLY
 #include "audio/stb_vorbis.h"
 
 static void trim_inplace(char* s) {
