@@ -31,6 +31,7 @@ static struct {
     bool playlist_bg_artwork;
     bool tooltip_artwork;
     bool fuzzy_search;
+    bool index_log;
 } current_settings;
 
 static int clamp_max_playlists(int value) {
@@ -86,6 +87,9 @@ static void apply_config_line(const char* line) {
     if (sscanf(line, "fuzzy_search=%d", &value) == 1) {
         current_settings.fuzzy_search = (value != 0);
     }
+    if (sscanf(line, "index_log=%d", &value) == 1) {
+        current_settings.index_log = (value != 0);
+    }
 }
 
 static void load_config_file(const char* path) {
@@ -127,6 +131,7 @@ void Settings_init(void) {
     current_settings.playlist_bg_artwork = false;
     current_settings.tooltip_artwork = false;
     current_settings.fuzzy_search = true;
+    current_settings.index_log = false;
 
     load_config_file(SETTINGS_FILE);
     load_config_file(OVERRIDES_FILE);
@@ -198,6 +203,10 @@ int Settings_getMaxPlaylists(void) {
 
 int Settings_getPlaylistScanDepth(void) {
     return current_settings.playlist_scan_depth;
+}
+
+bool Settings_getIndexLog(void) {
+    return current_settings.index_log;
 }
 
 bool Settings_getLyricsEnabled(void) {

@@ -24,14 +24,19 @@
 #define LIBRARY_INDEX_FORMAT_VERSION 4
 #define MUSIC_PATH SDCARD_PATH "/Music"
 #define INDEX_BIN_PATH SHARED_USERDATA_PATH "/music-player/library_index.bin"
+#define INDEX_BIN_TMP_PATH SHARED_USERDATA_PATH "/music-player/library_index.bin.tmp"
 #define INDEX_JSON_PATH SHARED_USERDATA_PATH "/music-player/library_index.json"
+#define INDEX_LOG_PATH SHARED_USERDATA_PATH "/music-player/index.log"
 #define LIBRARY_MAX_TRACKS 32768
-#define LIBRARY_MAX_TOKENS 131072
+#define LIBRARY_MAX_PLAYLISTS_INDEX 10000
+#define LIBRARY_MAX_TOKENS 65536
 #define TOKEN_GROW 16
-#define TOKEN_HASH_BUCKETS 16384
-#define FUZZY_MIN_TOKEN_LEN 3
+#define TOKEN_HASH_BUCKETS 8192
+#define FUZZY_MIN_TOKEN_LEN 4
 #define FUZZY_RESULT_THRESHOLD 3
 #define INDEX_BIN_MAGIC 0x49504D4E
+#define FP_MAX_DEPTH 16
+#define INDEX_BUILD_STACK_SIZE (512 * 1024)
 
 typedef struct {
     char path[512];
@@ -145,6 +150,16 @@ static void set_status(const char* msg) {
     pthread_mutex_unlock(&index_mutex);
 }
 
+static void index_log(const char* msg) {
+    if (!msg || !Settings_getIndexLog()) return;
+    mkdir(SHARED_USERDATA_PATH "/music-player", 0755);
+    FILE* f = fopen(INDEX_LOG_PATH, "a");
+    if (!f) return;
+    fprintf(f, "%s\n", msg);
+    fflush(f);
+    fclose(f);
+}
+
 static void set_index_ready(bool ready) {
     pthread_mutex_lock(&index_mutex);
     index_ready = ready;
@@ -175,7 +190,30 @@ static bool skip_dirent_name(const char* name, bool include_hidden) {
     return !include_hidden && name[0] == '.';
 }
 
-static void fp_collect_dir(const char* dir, FpEntry** entries, int* count, int* cap, bool playlists_only) {
+static void fp_append_entry(FpEntry** entries, int* count, int* cap,
+                            const char* path, uint64_t mtime, uint64_t size, bool is_playlist) {
+    if (!path || !path[0] || !entries || !count || !cap) return;
+
+    if (*count >= *cap) {
+        int nc = *cap ? *cap * 2 : 4096;
+        FpEntry* ne = realloc(*entries, sizeof(FpEntry) * nc);
+        if (!ne) return;
+        *entries = ne;
+        *cap = nc;
+    }
+
+    FpEntry* e = &(*entries)[*count];
+    strncpy(e->path, path, sizeof(e->path) - 1);
+    e->mtime = mtime;
+    e->size = size;
+    e->is_playlist = is_playlist;
+    (*count)++;
+}
+
+static void fp_collect_dir(const char* dir, FpEntry** entries, int* count, int* cap,
+                           bool playlists_only, int depth) {
+    if (depth > FP_MAX_DEPTH) return;
+
     DIR* d = opendir(dir);
     if (!d) return;
 
@@ -191,7 +229,7 @@ static void fp_collect_dir(const char* dir, FpEntry** entries, int* count, int* 
         if (S_ISLNK(st.st_mode)) continue;
 
         if (S_ISDIR(st.st_mode)) {
-            fp_collect_dir(full, entries, count, cap, playlists_only);
+            fp_collect_dir(full, entries, count, cap, playlists_only, depth + 1);
             continue;
         }
 
@@ -206,20 +244,7 @@ static void fp_collect_dir(const char* dir, FpEntry** entries, int* count, int* 
         }
         if (!include) continue;
 
-        if (*count >= *cap) {
-            int nc = *cap ? *cap * 2 : 4096;
-            FpEntry* ne = realloc(*entries, sizeof(FpEntry) * nc);
-            if (!ne) continue;
-            *entries = ne;
-            *cap = nc;
-        }
-
-        FpEntry* e = &(*entries)[*count];
-        strncpy(e->path, full, sizeof(e->path) - 1);
-        e->mtime = (uint64_t)st.st_mtime;
-        e->size = (uint64_t)st.st_size;
-        e->is_playlist = playlists_only;
-        (*count)++;
+        fp_append_entry(entries, count, cap, full, (uint64_t)st.st_mtime, (uint64_t)st.st_size, playlists_only);
     }
     closedir(d);
 }
@@ -229,8 +254,22 @@ static void compute_fingerprint(LibraryFingerprint* fp) {
     int count = 0;
     int cap = 0;
 
-    fp_collect_dir(MUSIC_PATH, &entries, &count, &cap, false);
-    fp_collect_dir(PLAYLISTS_DIR, &entries, &count, &cap, true);
+    set_status("Scanning library...");
+    index_log("compute_fingerprint: collecting audio paths");
+
+    char** paths = NULL;
+    int path_count = Playlist_collectPathsEx(MUSIC_PATH, &paths, LIBRARY_MAX_TRACKS, true);
+    if (path_count > 0 && paths) {
+        for (int i = 0; i < path_count; i++) {
+            struct stat st;
+            if (stat(paths[i], &st) != 0) continue;
+            fp_append_entry(&entries, &count, &cap, paths[i],
+                            (uint64_t)st.st_mtime, (uint64_t)st.st_size, false);
+        }
+        Playlist_freePaths(paths, path_count);
+    }
+
+    fp_collect_dir(PLAYLISTS_DIR, &entries, &count, &cap, true, 0);
 
     if (count > 1) {
         qsort(entries, (size_t)count, sizeof(FpEntry), fp_entry_cmp);
@@ -379,40 +418,12 @@ typedef struct {
     bool is_track;
 } TokenAddCtx;
 
-static void add_fuzzy_keys(const char* token, int id, bool is_track) {
-    if (!token || strlen(token) < FUZZY_MIN_TOKEN_LEN) return;
-
-    size_t len = strlen(token);
-    char key[48];
-
-    for (size_t p = FUZZY_MIN_TOKEN_LEN; p < len; p++) {
-        memcpy(key, token, p);
-        key[p] = '\0';
-        int ti = ensure_token(key);
-        if (ti >= 0) {
-            if (is_track) token_add_track(ti, id);
-            else token_add_playlist(ti, id);
-        }
-    }
-
-    for (size_t t = 0; t + FUZZY_MIN_TOKEN_LEN <= len; t++) {
-        memcpy(key, token + t, FUZZY_MIN_TOKEN_LEN);
-        key[FUZZY_MIN_TOKEN_LEN] = '\0';
-        int ti = ensure_token(key);
-        if (ti >= 0) {
-            if (is_track) token_add_track(ti, id);
-            else token_add_playlist(ti, id);
-        }
-    }
-}
-
 static void add_token_cb(const char* token, void* userdata) {
     TokenAddCtx* ctx = (TokenAddCtx*)userdata;
     int ti = ensure_token(token);
     if (ti < 0) return;
     if (ctx->is_track) token_add_track(ti, ctx->id);
     else token_add_playlist(ti, ctx->id);
-    add_fuzzy_keys(token, ctx->id, ctx->is_track);
 }
 
 static void index_track_norms(IndexedTrack* tr) {
@@ -477,8 +488,17 @@ static void clear_token_index(void) {
 
 static void rebuild_token_index(void) {
     clear_token_index();
-    for (int i = 0; i < track_count; i++) index_track_tokens(i);
-    for (int i = 0; i < playlist_count; i++) index_playlist_tokens(i);
+    char status[128];
+    for (int i = 0; i < track_count; i++) {
+        if ((i & 255) == 0) {
+            snprintf(status, sizeof(status), "Building index... tracks %d/%d", i, track_count);
+            set_status(status);
+        }
+        index_track_tokens(i);
+    }
+    for (int i = 0; i < playlist_count; i++) {
+        index_playlist_tokens(i);
+    }
 }
 
 typedef struct {
@@ -637,6 +657,23 @@ static TrackCacheEntry* load_track_cache(int* out_count) {
     return load_track_cache_from_json(out_count);
 }
 
+static void discard_bin_index(void) {
+    unlink(INDEX_BIN_PATH);
+    unlink(INDEX_BIN_TMP_PATH);
+}
+
+static bool bin_file_size_valid(FILE* f, const IndexBinHeader* hdr) {
+    if (fseek(f, 0, SEEK_END) != 0) return false;
+    long fsize = ftell(f);
+    if (fsize < 0) return false;
+    if (fseek(f, (long)sizeof(*hdr), SEEK_SET) != 0) return false;
+
+    long expected = (long)sizeof(*hdr)
+        + (long)hdr->track_count * (long)sizeof(IndexBinTrack)
+        + (long)hdr->playlist_count * (long)sizeof(IndexBinPlaylist);
+    return fsize >= expected;
+}
+
 static bool load_bin_index(uint64_t expected_fp) {
     FILE* f = fopen(INDEX_BIN_PATH, "rb");
     if (!f) return false;
@@ -645,21 +682,24 @@ static bool load_bin_index(uint64_t expected_fp) {
     if (fread(&hdr, sizeof(hdr), 1, f) != 1 ||
         hdr.magic != INDEX_BIN_MAGIC ||
         hdr.version != LIBRARY_INDEX_FORMAT_VERSION ||
-        hdr.fingerprint != expected_fp) {
+        hdr.fingerprint != expected_fp ||
+        hdr.track_count > LIBRARY_MAX_TRACKS ||
+        hdr.playlist_count > LIBRARY_MAX_PLAYLISTS_INDEX ||
+        !bin_file_size_valid(f, &hdr)) {
         fclose(f);
+        discard_bin_index();
+        index_log("load_bin_index: rejected cache file");
         return false;
     }
 
     free_index_data();
+    index_log("load_bin_index: loading tracks from cache");
 
     if (hdr.track_count > 0) {
-        if (hdr.track_count > LIBRARY_MAX_TRACKS) {
-            fclose(f);
-            return false;
-        }
         tracks = calloc(hdr.track_count, sizeof(IndexedTrack));
         if (!tracks) {
             fclose(f);
+            discard_bin_index();
             return false;
         }
         for (uint32_t i = 0; i < hdr.track_count; i++) {
@@ -667,6 +707,8 @@ static bool load_bin_index(uint64_t expected_fp) {
             if (fread(&bt, sizeof(bt), 1, f) != 1) {
                 free_index_data();
                 fclose(f);
+                discard_bin_index();
+                index_log("load_bin_index: truncated track record");
                 return false;
             }
             copy_track_from_bin(&bt, &tracks[track_count++]);
@@ -678,6 +720,7 @@ static bool load_bin_index(uint64_t expected_fp) {
         if (!playlists) {
             free_index_data();
             fclose(f);
+            discard_bin_index();
             return false;
         }
         for (uint32_t i = 0; i < hdr.playlist_count; i++) {
@@ -685,6 +728,8 @@ static bool load_bin_index(uint64_t expected_fp) {
             if (fread(&bp, sizeof(bp), 1, f) != 1) {
                 free_index_data();
                 fclose(f);
+                discard_bin_index();
+                index_log("load_bin_index: truncated playlist record");
                 return false;
             }
             copy_playlist_from_bin(&bp, &playlists[playlist_count++]);
@@ -692,6 +737,7 @@ static bool load_bin_index(uint64_t expected_fp) {
     }
 
     fclose(f);
+    index_log("load_bin_index: rebuilding token index");
     rebuild_token_index();
     saved_fingerprint = expected_fp;
     return true;
@@ -700,7 +746,7 @@ static bool load_bin_index(uint64_t expected_fp) {
 static int save_bin_index(uint64_t fp) {
     mkdir(SHARED_USERDATA_PATH "/music-player", 0755);
 
-    FILE* f = fopen(INDEX_BIN_PATH, "wb");
+    FILE* f = fopen(INDEX_BIN_TMP_PATH, "wb");
     if (!f) return -1;
 
     IndexBinHeader hdr = {
@@ -713,6 +759,7 @@ static int save_bin_index(uint64_t fp) {
 
     if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
         fclose(f);
+        unlink(INDEX_BIN_TMP_PATH);
         return -1;
     }
 
@@ -729,6 +776,7 @@ static int save_bin_index(uint64_t fp) {
         bt.size = tracks[i].file_size;
         if (fwrite(&bt, sizeof(bt), 1, f) != 1) {
             fclose(f);
+            unlink(INDEX_BIN_TMP_PATH);
             return -1;
         }
     }
@@ -744,11 +792,19 @@ static int save_bin_index(uint64_t fp) {
         bp.is_root = playlists[i].is_root ? 1 : 0;
         if (fwrite(&bp, sizeof(bp), 1, f) != 1) {
             fclose(f);
+            unlink(INDEX_BIN_TMP_PATH);
             return -1;
         }
     }
 
+    fflush(f);
     fclose(f);
+
+    unlink(INDEX_BIN_PATH);
+    if (rename(INDEX_BIN_TMP_PATH, INDEX_BIN_PATH) != 0) {
+        unlink(INDEX_BIN_TMP_PATH);
+        return -1;
+    }
     return 0;
 }
 
@@ -859,12 +915,14 @@ static void index_playlist_tokens(int id) {
 }
 
 static void rebuild_index(uint64_t fp) {
+    index_log("rebuild_index: start");
     free_index_data();
 
     int cache_count = 0;
     TrackCacheEntry* cache = load_track_cache(&cache_count);
 
     set_status("Scanning music...");
+    index_log("rebuild_index: scanning music paths");
     {
         char** paths = NULL;
         int count = Playlist_collectPathsEx(MUSIC_PATH, &paths, LIBRARY_MAX_TRACKS, true);
@@ -967,16 +1025,24 @@ static void rebuild_index(uint64_t fp) {
     char done[128];
     snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
     set_status(done);
+    snprintf(done, sizeof(done), "rebuild_index: done (%d tracks, %d playlists)", track_count, playlist_count);
+    index_log(done);
 }
 
 static void* build_thread_func(void* arg) {
     bool force_rebuild = ((intptr_t)arg) != 0;
     PWR_pinToCores(CPU_CORE_PERFORMANCE);
 
+    index_log(force_rebuild ? "build_thread: force rebuild" : "build_thread: start");
+
     M3U_init();
 
     LibraryFingerprint fp;
     compute_fingerprint(&fp);
+
+    char fp_msg[96];
+    snprintf(fp_msg, sizeof(fp_msg), "build_thread: fingerprint %016llx", (unsigned long long)fp.hash);
+    index_log(fp_msg);
 
     if (force_rebuild) {
         rebuild_index(fp.hash);
@@ -986,10 +1052,12 @@ static void* build_thread_func(void* arg) {
             char done[128];
             snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
             set_status(done);
+            index_log("build_thread: loaded binary index");
         } else if (load_json_index(fp.hash)) {
             char done[128];
             snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
             set_status(done);
+            index_log("build_thread: migrated JSON index");
         } else {
             rebuild_index(fp.hash);
         }
@@ -999,6 +1067,7 @@ static void* build_thread_func(void* arg) {
     index_ready = true;
     build_running = false;
     pthread_mutex_unlock(&index_mutex);
+    index_log("build_thread: complete");
     return NULL;
 }
 
@@ -1013,11 +1082,20 @@ static bool start_build_thread(bool force_rebuild) {
     pthread_mutex_unlock(&index_mutex);
 
     pthread_t thread;
-    if (pthread_create(&thread, NULL, build_thread_func, (void*)(intptr_t)(force_rebuild ? 1 : 0)) != 0) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, INDEX_BUILD_STACK_SIZE);
+
+    int rc = pthread_create(&thread, &attr, build_thread_func,
+                            (void*)(intptr_t)(force_rebuild ? 1 : 0));
+    pthread_attr_destroy(&attr);
+
+    if (rc != 0) {
         pthread_mutex_lock(&index_mutex);
         build_running = false;
         pthread_mutex_unlock(&index_mutex);
         snprintf(build_status, sizeof(build_status), "Index build failed");
+        index_log("start_build_thread: pthread_create failed");
         return false;
     }
     pthread_detach(thread);
@@ -1028,6 +1106,10 @@ void LibraryIndex_init(void) {
     if (build_started) return;
     build_started = true;
     snprintf(build_status, sizeof(build_status), "Starting...");
+    if (Settings_getIndexLog()) {
+        unlink(INDEX_LOG_PATH);
+        index_log("LibraryIndex_init");
+    }
     start_build_thread(false);
 }
 
@@ -1060,51 +1142,103 @@ const char* LibraryIndex_getBuildStatus(void) {
     return build_status;
 }
 
-static int gather_query_keys(const char* token, char keys[][48], int max_keys, bool fuzzy) {
-    if (!token || !token[0] || max_keys <= 0) return 0;
+static bool edit_distance_le1(const char* a, const char* b) {
+    if (!a || !b) return false;
 
-    int count = 0;
-    strncpy(keys[count], token, 47);
-    keys[count][47] = '\0';
-    count++;
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    if (la == 0 || lb == 0 || la > 31 || lb > 31) return false;
+    if (strcmp(a, b) == 0) return true;
 
-    if (!fuzzy || strlen(token) < FUZZY_MIN_TOKEN_LEN) return count;
-
-    size_t len = strlen(token);
-    for (size_t p = FUZZY_MIN_TOKEN_LEN; p < len && count < max_keys; p++) {
-        bool dup = false;
-        for (int i = 0; i < count; i++) {
-            if (strncmp(keys[i], token, p) == 0 && keys[i][p] == '\0') {
-                dup = true;
-                break;
-            }
+    if (la == lb) {
+        int diff = 0;
+        for (size_t i = 0; i < la; i++) {
+            if (a[i] != b[i] && ++diff > 1) return false;
         }
-        if (!dup) {
-            memcpy(keys[count], token, p);
-            keys[count][p] = '\0';
-            count++;
-        }
+        return diff <= 1;
     }
 
-    for (size_t t = 0; t + FUZZY_MIN_TOKEN_LEN <= len && count < max_keys; t++) {
-        char tri[4];
-        memcpy(tri, token + t, FUZZY_MIN_TOKEN_LEN);
-        tri[FUZZY_MIN_TOKEN_LEN] = '\0';
-        bool dup = false;
-        for (int i = 0; i < count; i++) {
-            if (strcmp(keys[i], tri) == 0) {
-                dup = true;
-                break;
+    if (la + 1 == lb) {
+        size_t i = 0;
+        size_t j = 0;
+        int skipped = 0;
+        while (i < la && j < lb) {
+            if (a[i] == b[j]) {
+                i++;
+                j++;
+            } else if (skipped == 0) {
+                j++;
+                skipped = 1;
+            } else {
+                return false;
             }
         }
-        if (!dup) {
-            strncpy(keys[count], tri, 47);
-            keys[count][47] = '\0';
-            count++;
-        }
+        return true;
     }
 
-    return count;
+    if (lb + 1 == la) {
+        size_t i = 0;
+        size_t j = 0;
+        int skipped = 0;
+        while (i < la && j < lb) {
+            if (a[i] == b[j]) {
+                i++;
+                j++;
+            } else if (skipped == 0) {
+                i++;
+                skipped = 1;
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static void add_postings_for_token(int token_idx,
+                                   bool* track_matched_token, bool* playlist_matched_token,
+                                   int* track_hits, int* playlist_hits) {
+    if (token_idx < 0) return;
+
+    IndexToken* tok = &tokens[token_idx];
+    for (int i = 0; i < tok->track_count; i++) {
+        int id = tok->track_ids[i];
+        if (id >= 0 && id < track_count && !track_matched_token[id]) {
+            track_matched_token[id] = true;
+            track_hits[id]++;
+        }
+    }
+    for (int i = 0; i < tok->playlist_count; i++) {
+        int id = tok->playlist_ids[i];
+        if (id >= 0 && id < playlist_count && !playlist_matched_token[id]) {
+            playlist_matched_token[id] = true;
+            playlist_hits[id]++;
+        }
+    }
+}
+
+static void apply_query_token(const char* query_token, bool fuzzy,
+                              bool* track_matched_token, bool* playlist_matched_token,
+                              int* track_hits, int* playlist_hits) {
+    if (!query_token || !query_token[0]) return;
+
+    int exact = find_token(query_token);
+    if (exact >= 0) {
+        add_postings_for_token(exact, track_matched_token, playlist_matched_token,
+                               track_hits, playlist_hits);
+    }
+
+    if (!fuzzy || strlen(query_token) < FUZZY_MIN_TOKEN_LEN) return;
+
+    uint32_t bucket = hash_token_string(query_token) % TOKEN_HASH_BUCKETS;
+    for (TokenHashNode* n = token_hash[bucket]; n; n = n->next) {
+        if (n->token_idx == exact) continue;
+        if (!edit_distance_le1(query_token, tokens[n->token_idx].token)) continue;
+        add_postings_for_token(n->token_idx, track_matched_token, playlist_matched_token,
+                               track_hits, playlist_hits);
+    }
 }
 
 static void count_token_postings(const char query_tokens[][48], int query_token_count, bool fuzzy,
@@ -1118,31 +1252,10 @@ static void count_token_postings(const char query_tokens[][48], int query_token_
     }
 
     for (int q = 0; q < query_token_count; q++) {
-        char keys[24][48];
-        int key_count = gather_query_keys(query_tokens[q], keys, 24, fuzzy);
         memset(track_matched_token, 0, (size_t)track_count * sizeof(bool));
         memset(playlist_matched_token, 0, (size_t)playlist_count * sizeof(bool));
-
-        for (int k = 0; k < key_count; k++) {
-            int ti = find_token(keys[k]);
-            if (ti < 0) continue;
-
-            IndexToken* tok = &tokens[ti];
-            for (int i = 0; i < tok->track_count; i++) {
-                int id = tok->track_ids[i];
-                if (id >= 0 && id < track_count && !track_matched_token[id]) {
-                    track_matched_token[id] = true;
-                    track_hits[id]++;
-                }
-            }
-            for (int i = 0; i < tok->playlist_count; i++) {
-                int id = tok->playlist_ids[i];
-                if (id >= 0 && id < playlist_count && !playlist_matched_token[id]) {
-                    playlist_matched_token[id] = true;
-                    playlist_hits[id]++;
-                }
-            }
-        }
+        apply_query_token(query_tokens[q], fuzzy, track_matched_token, playlist_matched_token,
+                          track_hits, playlist_hits);
     }
 
     free(track_matched_token);

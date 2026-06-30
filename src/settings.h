@@ -46,6 +46,7 @@ const char* Settings_getSoftLimiterDisplayStr(void);
 // Power-user overrides (read from overrides.cfg only)
 int Settings_getMaxPlaylists(void);
 int Settings_getPlaylistScanDepth(void);
+bool Settings_getIndexLog(void);
 
 // Playlist detail background from sidecar artwork
 bool Settings_getPlaylistBgArtwork(void);
