@@ -8,6 +8,7 @@
 #include "module_player.h"
 #include "module_playlist.h"
 #include "module_downloader.h"
+#include "module_search.h"
 #include "ui_utils.h"
 #include "ui_fonts.h"
 
@@ -15,12 +16,13 @@
 #define LIBRARY_FILES       0
 #define LIBRARY_PLAYLISTS   1
 #define LIBRARY_DOWNLOADER  2
-#define LIBRARY_ITEM_COUNT  3
+#define LIBRARY_SEARCH      3
+#define LIBRARY_ITEM_COUNT  4
 
 // Help state for controls dialog
 #define LIBRARY_MENU_HELP_STATE 55
 
-static const char* library_items[] = {"Files", "Playlists", "Downloader"};
+static const char* library_items[] = {"Files", "Playlists", "Downloader", "Search"};
 
 // Toast state
 static char library_toast_message[128] = "";
@@ -97,6 +99,9 @@ ModuleExitReason LibraryModule_run(SDL_Surface* screen) {
                     break;
                 case LIBRARY_DOWNLOADER:
                     reason = DownloaderModule_run(screen);
+                    break;
+                case LIBRARY_SEARCH:
+                    reason = SearchModule_run(screen);
                     break;
             }
 

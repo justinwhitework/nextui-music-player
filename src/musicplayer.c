@@ -35,6 +35,7 @@
 #include "display_helper.h"
 #include "playlist_art.h"
 #include "track_art.h"
+#include "library_index.h"
 
 // Global quit flag
 static bool quit = false;
@@ -127,6 +128,7 @@ int main(int argc, char* argv[]) {
     Settings_init();
     PlaylistArt_init();
     TrackArt_init();
+    LibraryIndex_init();
 
     // Initialize resume state
     Resume_init();
@@ -202,6 +204,7 @@ cleanup:
     Background_stopAll();
     Downloader_cleanup();
     TrackArt_cleanup();
+    LibraryIndex_quit();
     PlaylistArt_cleanup();
     Settings_quit();
     ModuleCommon_quit();

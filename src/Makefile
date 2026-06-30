@@ -103,18 +103,18 @@ MBEDTLS_OBJS = $(patsubst %.c,$(MBEDTLS_OBJ_DIR)/%.o,$(MBEDTLS_SRC))
 # Main application sources
 
 APP_SRC = \
-    musicplayer.c player.c playlist.c playlist_m3u.c \
+    musicplayer.c player.c playlist.c playlist_m3u.c metadata_reader.c library_index.c \
     radio.c radio_net.c album_art.c lyrics.c radio_hls.c radio_curated.c \
     downloader.c selfupdate.c display_helper.c \
     podcast.c podcast_rss.c podcast_search.c \
     http_download.c wget_fetch.c wifi.c keyboard.c settings.c resume.c \
     add_to_playlist.c background.c image_utils.c playlist_art.c m4a_metadata.c track_art.c \
     module_common.c module_menu.c module_library.c module_player.c \
-    module_playlist.c module_radio.c module_podcast.c module_downloader.c \
+    module_playlist.c module_radio.c module_podcast.c module_downloader.c module_search.c \
     module_system.c module_settings.c \
     ui_fonts.c ui_icons.c ui_utils.c browser.c ui_album_art.c \
     ui_main.c ui_music.c ui_radio.c ui_downloader.c ui_podcast.c \
-    ui_playlist.c ui_system.c ui_settings.c \
+    ui_playlist.c ui_system.c ui_settings.c ui_search.c \
     spectrum.c \
     audio/kiss_fft.c audio/kiss_fftr.c \
     include/yxml/yxml.c \

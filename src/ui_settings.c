@@ -18,9 +18,10 @@
 #define SETTINGS_ITEM_PLAYLIST_BG_ART 3
 #define SETTINGS_ITEM_TOOLTIP_ART   4
 #define SETTINGS_ITEM_CLEAR_CACHE   5
-#define SETTINGS_ITEM_UPDATE_YTDLP  6
-#define SETTINGS_ITEM_ABOUT         7
-#define SETTINGS_ITEM_COUNT         8
+#define SETTINGS_ITEM_REBUILD_INDEX 6
+#define SETTINGS_ITEM_UPDATE_YTDLP  7
+#define SETTINGS_ITEM_ABOUT         8
+#define SETTINGS_ITEM_COUNT         9
 
 // Format cache size as human-readable string
 static void format_cache_size(long bytes, char* buf, int buf_size) {
@@ -33,7 +34,7 @@ static void format_cache_size(long bytes, char* buf, int buf_size) {
     }
 }
 
-void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_selected) {
+void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_selected, int menu_scroll) {
     GFX_clear(screen);
 
     int hw = screen->w;
@@ -41,18 +42,14 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
     render_screen_header(screen, "Settings", show_setting);
     ListLayout layout = calc_list_layout(screen);
 
-    // Vertically center items in available area
-    int item_h = SCALE1(PILL_SIZE);
-    int total_items_h = SETTINGS_ITEM_COUNT * item_h;
-    int start_y = layout.list_y + (layout.list_h - total_items_h) / 8;
-
     char truncated[256];
     char label_buffer[256];
 
-    for (int i = 0; i < SETTINGS_ITEM_COUNT; i++) {
+    for (int vis = 0; vis < layout.items_per_page && (menu_scroll + vis) < SETTINGS_ITEM_COUNT; vis++) {
+        int i = menu_scroll + vis;
         bool selected = (i == menu_selected);
 
-        int item_y = start_y + i * item_h;
+        int item_y = layout.list_y + vis * layout.item_h;
 
         // Build label text based on item
         const char* label = "";
@@ -87,6 +84,9 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
                 label = label_buffer;
                 break;
             }
+            case SETTINGS_ITEM_REBUILD_INDEX:
+                label = "Rebuild Search Index";
+                break;
             case SETTINGS_ITEM_UPDATE_YTDLP:
                 label = "Update yt-dlp";
                 break;
@@ -111,7 +111,7 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
 
         // Text position
         int text_x = SCALE1(PADDING) + SCALE1(BUTTON_PADDING);
-        int text_y = item_y + (SCALE1(PILL_SIZE) - TTF_FontHeight(font)) / 2;
+        int text_y = item_y + (layout.item_h - TTF_FontHeight(font)) / 2;
 
         if (selected) {
             // Selected item rendering - use theme colors
@@ -124,11 +124,11 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
 
                 // 1. Draw full-width pill as row background with primary accent color
                 int row_width = hw - SCALE1(PADDING * 2);
-                SDL_Rect row_rect = {SCALE1(PADDING), item_y, row_width, SCALE1(PILL_SIZE)};
+                SDL_Rect row_rect = {SCALE1(PADDING), item_y, row_width, layout.item_h};
                 GFX_blitPillColor(ASSET_WHITE_PILL, screen, &row_rect, THEME_COLOR2, RGB_WHITE);
 
                 // 2. Draw THEME_COLOR2 pill around just the label (on top)
-                SDL_Rect label_pill_rect = {SCALE1(PADDING), item_y, label_pill_width, SCALE1(PILL_SIZE)};
+                SDL_Rect label_pill_rect = {SCALE1(PADDING), item_y, label_pill_width, layout.item_h};
                 GFX_blitPillColor(ASSET_WHITE_PILL, screen, &label_pill_rect, THEME_COLOR1, RGB_WHITE);
 
                 // 3. Render label with selected text color (dark on white pill)
@@ -150,7 +150,7 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
                 }
             } else {
                 // Item without option: pill with primary accent color
-                SDL_Rect label_pill_rect = {SCALE1(PADDING), item_y, label_pill_width, SCALE1(PILL_SIZE)};
+                SDL_Rect label_pill_rect = {SCALE1(PADDING), item_y, label_pill_width, layout.item_h};
                 GFX_blitPillColor(ASSET_WHITE_PILL, screen, &label_pill_rect, THEME_COLOR1, RGB_WHITE);
 
                 // Render label with selected text color
@@ -184,6 +184,8 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
         }
     }
 
+    render_scroll_indicators(screen, menu_scroll, layout.items_per_page, SETTINGS_ITEM_COUNT);
+
     // Button hints
     GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
 
@@ -197,6 +199,24 @@ void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_select
     } else {
         GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "OPEN", NULL}, 1, screen, 1);
     }
+}
+
+void render_index_rebuilding(SDL_Surface* screen, int show_setting, const char* status) {
+    GFX_clear(screen);
+    render_screen_header(screen, "Rebuild Search Index", show_setting);
+
+    const char* msg = (status && status[0]) ? status : "Rebuilding index...";
+    SDL_Surface* text = TTF_RenderUTF8_Blended(Fonts_getMedium(), msg, COLOR_WHITE);
+    if (text) {
+        SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
+            (screen->w - text->w) / 2,
+            screen->h / 2 - text->h / 2
+        });
+        SDL_FreeSurface(text);
+    }
+
+    GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
+    GFX_blitButtonGroup((char*[]){"B", "BACK", NULL}, 1, screen, 1);
 }
 
 void render_ytdlp_updating(SDL_Surface* screen, int show_setting) {

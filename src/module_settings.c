@@ -13,12 +13,15 @@
 #include "album_art.h"
 #include "playlist_art.h"
 #include "track_art.h"
+#include "library_index.h"
 #include "ui_album_art.h"
 
 // Internal states
 typedef enum {
     SETTINGS_STATE_MENU,
     SETTINGS_STATE_CLEAR_CACHE_CONFIRM,
+    SETTINGS_STATE_REBUILD_INDEX_CONFIRM,
+    SETTINGS_STATE_REBUILDING_INDEX,
     SETTINGS_STATE_ABOUT,
     SETTINGS_STATE_UPDATING,
     SETTINGS_STATE_UPDATING_YTDLP
@@ -31,9 +34,10 @@ typedef enum {
 #define SETTINGS_ITEM_PLAYLIST_BG_ART 3
 #define SETTINGS_ITEM_TOOLTIP_ART   4
 #define SETTINGS_ITEM_CLEAR_CACHE   5
-#define SETTINGS_ITEM_UPDATE_YTDLP  6
-#define SETTINGS_ITEM_ABOUT         7
-#define SETTINGS_ITEM_COUNT         8
+#define SETTINGS_ITEM_REBUILD_INDEX 6
+#define SETTINGS_ITEM_UPDATE_YTDLP  7
+#define SETTINGS_ITEM_ABOUT         8
+#define SETTINGS_ITEM_COUNT         9
 
 // Internal app state constants for controls help
 // These match the pattern used in ui_main.c
@@ -67,12 +71,14 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
         switch (state) {
             case SETTINGS_STATE_MENU:
                 // Navigation
-                if (PAD_justPressed(BTN_UP)) {
+                if (PAD_justRepeated(BTN_UP)) {
                     menu_selected = (menu_selected > 0) ? menu_selected - 1 : SETTINGS_ITEM_COUNT - 1;
+                    adjust_list_scroll(menu_selected, &menu_scroll, calc_list_layout(screen).items_per_page);
                     dirty = 1;
                 }
-                else if (PAD_justPressed(BTN_DOWN)) {
+                else if (PAD_justRepeated(BTN_DOWN)) {
                     menu_selected = (menu_selected < SETTINGS_ITEM_COUNT - 1) ? menu_selected + 1 : 0;
+                    adjust_list_scroll(menu_selected, &menu_scroll, calc_list_layout(screen).items_per_page);
                     dirty = 1;
                 }
                 // Left/Right for cyclable settings; page navigation for others
@@ -148,6 +154,10 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                             state = SETTINGS_STATE_CLEAR_CACHE_CONFIRM;
                             dirty = 1;
                             break;
+                        case SETTINGS_ITEM_REBUILD_INDEX:
+                            state = SETTINGS_STATE_REBUILD_INDEX_CONFIRM;
+                            dirty = 1;
+                            break;
                         case SETTINGS_ITEM_UPDATE_YTDLP:
                             if (Downloader_init() == 0 && Wifi_ensureConnected(screen, show_setting)) {
                                 Downloader_startUpdate();
@@ -182,6 +192,33 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                     state = SETTINGS_STATE_MENU;
                     dirty = 1;
                 }
+                break;
+
+            case SETTINGS_STATE_REBUILD_INDEX_CONFIRM:
+                if (PAD_justPressed(BTN_A)) {
+                    if (LibraryIndex_requestRebuild()) {
+                        state = SETTINGS_STATE_REBUILDING_INDEX;
+                    } else {
+                        state = SETTINGS_STATE_MENU;
+                    }
+                    dirty = 1;
+                }
+                else if (PAD_justPressed(BTN_B)) {
+                    state = SETTINGS_STATE_MENU;
+                    dirty = 1;
+                }
+                break;
+
+            case SETTINGS_STATE_REBUILDING_INDEX:
+                if (LibraryIndex_isReady() && !LibraryIndex_isBuilding()) {
+                    state = SETTINGS_STATE_MENU;
+                    dirty = 1;
+                }
+                if (PAD_justPressed(BTN_B)) {
+                    state = SETTINGS_STATE_MENU;
+                    dirty = 1;
+                }
+                dirty = 1;
                 break;
 
             case SETTINGS_STATE_ABOUT:
@@ -265,11 +302,18 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
         if (dirty) {
             switch (state) {
                 case SETTINGS_STATE_MENU:
-                    render_settings_menu(screen, show_setting, menu_selected);
+                    render_settings_menu(screen, show_setting, menu_selected, menu_scroll);
                     break;
                 case SETTINGS_STATE_CLEAR_CACHE_CONFIRM:
-                    render_settings_menu(screen, show_setting, menu_selected);
+                    render_settings_menu(screen, show_setting, menu_selected, menu_scroll);
                     render_confirmation_dialog(screen, NULL, "Clear album art cache?");
+                    break;
+                case SETTINGS_STATE_REBUILD_INDEX_CONFIRM:
+                    render_settings_menu(screen, show_setting, menu_selected, menu_scroll);
+                    render_confirmation_dialog(screen, NULL, "Rebuild library search index?");
+                    break;
+                case SETTINGS_STATE_REBUILDING_INDEX:
+                    render_index_rebuilding(screen, show_setting, LibraryIndex_getBuildStatus());
                     break;
                 case SETTINGS_STATE_ABOUT:
                     render_about(screen, show_setting);

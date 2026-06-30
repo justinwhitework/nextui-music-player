@@ -64,4 +64,10 @@ int M3U_loadTracks(const char* m3u_path, PlaylistTrack* tracks, int max, int* co
 // Check if a track path is already in the .m3u file.
 bool M3U_containsTrack(const char* m3u_path, const char* track_path);
 
+// True when .m3u lives directly in PLAYLISTS_DIR (user playlist).
+bool M3U_isRootPlaylist(const char* m3u_path);
+
+// Parent folder name relative to PLAYLISTS_DIR (e.g. "genres"), empty for root playlists.
+void M3U_getPlaylistParentFolder(const char* m3u_path, char* out, int out_size);
+
 #endif
