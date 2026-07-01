@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #include "defines.h"
 #include "api.h"
@@ -39,7 +40,7 @@
 #define INDEX_BIN_MAGIC 0x49504D4E
 #define FP_MAX_DEPTH 16
 #define INDEX_BUILD_STACK_SIZE (512 * 1024)
-#define BUILD_LOG_MAX_LINES 256
+#define BUILD_LOG_MAX_LINES 512
 #define BUILD_LOG_LINE_LEN 160
 
 typedef struct {
@@ -179,6 +180,42 @@ static int build_log_slot(int index) {
     if (index < 0 || index >= build_log_count) return -1;
     if (build_log_count < BUILD_LOG_MAX_LINES) return index;
     return (build_log_start + index) % BUILD_LOG_MAX_LINES;
+}
+
+#define INDEX_VERBOSE_TRACKS 64
+#define INDEX_VERBOSE_EVERY 32
+
+static bool index_verbose_step(int next_track_idx) {
+    return next_track_idx < INDEX_VERBOSE_TRACKS ||
+           (next_track_idx & (INDEX_VERBOSE_EVERY - 1)) == 0;
+}
+
+static void index_log(const char* msg);
+
+static void index_logf(const char* fmt, ...) {
+    if (!fmt) return;
+    char buf[BUILD_LOG_LINE_LEN];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    index_log(buf);
+}
+
+static void index_log_path(const char* prefix, int idx, const char* path) {
+    if (!path) return;
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    char short_path[96];
+    strncpy(short_path, base, sizeof(short_path) - 1);
+    short_path[sizeof(short_path) - 1] = '\0';
+    index_logf("%s [%d] %s", prefix ? prefix : "path", idx, short_path);
+}
+
+static void index_log_stats(const char* phase, int track_idx) {
+    index_logf("rebuild_index: %s idx=%d tracks=%d tokens=%d tokcap=%d nodes=%d nodecap=%d",
+                 phase ? phase : "?", track_idx, track_count, token_count,
+                 token_cap, token_hash_node_count, token_hash_node_cap);
 }
 
 static void set_status(const char* msg) {
@@ -452,7 +489,11 @@ static void token_add_track(int token_idx, int track_id) {
     if (t->track_count >= t->track_cap) {
         int nc = t->track_cap ? t->track_cap * 2 : TOKEN_GROW;
         int* nd = realloc(t->track_ids, sizeof(int) * nc);
-        if (!nd) return;
+        if (!nd) {
+            index_logf("token_index: track_ids realloc failed tok=%d track=%d",
+                       token_idx, track_id);
+            return;
+        }
         t->track_ids = nd;
         t->track_cap = nc;
     }
@@ -507,8 +548,34 @@ static void index_phrase_token(const char* norm_text, int track_id) {
     if (ti >= 0) token_add_track(ti, track_id);
 }
 
+static void index_track_tokens_verbose(int id) {
+    if (id < 0 || id >= track_count) return;
+    IndexedTrack* tr = &tracks[id];
+
+    TokenAddCtx ctx = {.id = id, .is_track = true};
+    int tok_before = token_count;
+
+    index_logf("tokenize [%d] title_norm=%.32s", id,
+                 tr->title_norm[0] ? tr->title_norm : "(empty)");
+    Metadata_foreachNormalizedToken(tr->title_norm, add_token_cb, &ctx);
+    index_log_stats("after title tokens", id);
+
+    Metadata_foreachNormalizedToken(tr->artist_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(tr->album_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(tr->genre_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(tr->filename_norm, add_token_cb, &ctx);
+    index_phrase_token(tr->title_norm, id);
+
+    index_logf("tokenize [%d] done +%d tokens", id, token_count - tok_before);
+}
+
 static void index_track_tokens(int id) {
     if (id < 0 || id >= track_count) return;
+    if (index_verbose_step(id)) {
+        index_track_tokens_verbose(id);
+        return;
+    }
+
     IndexedTrack* tr = &tracks[id];
 
     TokenAddCtx ctx = {.id = id, .is_track = true};
@@ -1064,7 +1131,10 @@ static void rebuild_index(uint64_t fp) {
                 int tag_reads = 0;
                 int stat_skips = 0;
                 index_log("rebuild_index: reading tags begin");
+                index_log_stats("tracks array ready", 0);
                 for (int i = 0; i < count; i++) {
+                    bool verbose = index_verbose_step(track_count);
+
                     if ((i & 511) == 0) {
                         snprintf(status, sizeof(status), "Reading tags... %d/%d", i, count);
                         set_status(status);
@@ -1075,13 +1145,28 @@ static void rebuild_index(uint64_t fp) {
                         index_log(logbuf);
                     }
 
+                    if (verbose) {
+                        index_logf("rebuild_index: loop file %d/%d", i, count);
+                        index_log_path("rebuild_index: file", track_count, paths[i]);
+                    }
+
                     struct stat st;
                     if (stat(paths[i], &st) != 0 || !S_ISREG(st.st_mode)) {
                         stat_skips++;
+                        if (verbose) {
+                            index_logf("rebuild_index: skip stat fail i=%d", i);
+                        }
                         continue;
                     }
 
+                    if (verbose) {
+                        index_logf("rebuild_index: stat ok size=%llu", (unsigned long long)st.st_size);
+                    }
+
                     if (track_count >= tracks_cap) {
+                        if (verbose) {
+                            index_logf("rebuild_index: grow tracks %d -> ?", tracks_cap);
+                        }
                         int new_cap = tracks_cap * 2;
                         if (new_cap > count) new_cap = count;
                         if (new_cap <= tracks_cap) break;
@@ -1094,9 +1179,7 @@ static void rebuild_index(uint64_t fp) {
                                (size_t)(new_cap - tracks_cap) * sizeof(IndexedTrack));
                         tracks = grown;
                         tracks_cap = new_cap;
-                        char logbuf[96];
-                        snprintf(logbuf, sizeof(logbuf), "rebuild_index: tracks cap %d", tracks_cap);
-                        index_log(logbuf);
+                        index_logf("rebuild_index: tracks cap %d", tracks_cap);
                     }
 
                     IndexedTrack* tr = &tracks[track_count];
@@ -1106,15 +1189,30 @@ static void rebuild_index(uint64_t fp) {
                         cached->file_size == (uint64_t)st.st_size &&
                         track_cache_apply(cached, tr)) {
                         cache_hits++;
+                        if (verbose) {
+                            index_logf("rebuild_index: cache hit idx=%d", track_count);
+                        }
                     } else {
                         tag_reads++;
                         memset(tr, 0, sizeof(*tr));
                         strncpy(tr->path, paths[i], sizeof(tr->path) - 1);
                         tr->format = Player_detectFormat(paths[i]);
 
+                        if (verbose) {
+                            index_logf("rebuild_index: read tags fmt=%d idx=%d",
+                                       (int)tr->format, track_count);
+                        }
+
                         TrackMetadata meta;
                         memset(&meta, 0, sizeof(meta));
                         Metadata_readFromFileEx(paths[i], tr->format, &meta);
+
+                        if (verbose) {
+                            index_logf("rebuild_index: tags read title=%.40s artist=%.32s",
+                                       meta.title[0] ? meta.title : "(none)",
+                                       meta.artist[0] ? meta.artist : "(none)");
+                        }
+
                         strncpy(tr->title, meta.title, sizeof(tr->title) - 1);
                         strncpy(tr->artist, meta.artist, sizeof(tr->artist) - 1);
                         strncpy(tr->album, meta.album, sizeof(tr->album) - 1);
@@ -1129,21 +1227,15 @@ static void rebuild_index(uint64_t fp) {
                         tr->file_size = (uint64_t)st.st_size;
                     }
 
+                    if (verbose) {
+                        index_log_stats("before tokenize", track_count);
+                    }
+
                     track_count++;
                     index_track_tokens(track_count - 1);
 
-                    if (track_count == 1) {
-                        char logbuf[160];
-                        snprintf(logbuf, sizeof(logbuf),
-                                 "rebuild_index: first track tokens ok tokens=%d",
-                                 token_count);
-                        index_log(logbuf);
-                    } else if ((track_count & 511) == 0) {
-                        char logbuf[128];
-                        snprintf(logbuf, sizeof(logbuf),
-                                 "rebuild_index: token progress %d/%d tokens=%d",
-                                 track_count, count, token_count);
-                        index_log(logbuf);
+                    if (verbose) {
+                        index_log_stats("after tokenize", track_count - 1);
                     }
                 }
                 snprintf(status, sizeof(status), "Reading tags... %d/%d", count, count);
@@ -1221,12 +1313,11 @@ static void rebuild_index(uint64_t fp) {
     }
 
     index_log("rebuild_index: playlist tokens begin");
+    index_log_stats("playlist tokens start", -1);
     for (int i = 0; i < playlist_count; i++) {
         if ((i & 255) == 0) {
-            char logbuf[96];
-            snprintf(logbuf, sizeof(logbuf), "rebuild_index: playlist tokens %d/%d",
-                     i, playlist_count);
-            index_log(logbuf);
+            index_logf("rebuild_index: playlist tokens %d/%d", i, playlist_count);
+            index_log_stats("playlist tokenize", i);
         }
         index_playlist_tokens(i);
     }
