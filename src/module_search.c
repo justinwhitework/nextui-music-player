@@ -48,7 +48,7 @@ static bool detail_is_single_track = false;
 static pthread_t search_thread;
 static bool search_thread_active = false;
 static volatile bool search_worker_done = false;
-static bool search_worker_ok = false;
+static volatile bool search_worker_ok = false;
 static SearchResults search_worker_results;
 static uint32_t search_started_ticks = 0;
 static bool search_warn_shown = false;
@@ -131,21 +131,27 @@ static void cancel_search(void) {
     LibraryIndex_searchAbort();
     finish_search_thread();
     LibraryIndex_searchClearAbort();
+    search_worker_done = false;
+    search_timeout_fired = false;
 }
 
 static void complete_search(SearchState* state, int* results_selected, int* results_scroll, int* dirty) {
-    finish_search_thread();
-    memcpy(&search_results, &search_worker_results, sizeof(search_results));
+    bool ok = search_worker_ok;
+    SearchResults results = search_worker_results;
 
-    if (LibraryIndex_searchTimedOut()) {
+    search_worker_done = false;
+
+    memcpy(&search_results, &results, sizeof(search_results));
+
+    if (search_timeout_fired) {
         show_toast("Search timed out");
     }
 
-    if (search_worker_ok) {
+    if (ok) {
         *results_selected = results_first_selectable(&search_results);
         *results_scroll = 0;
         *state = SEARCH_STATE_RESULTS;
-    } else if (!LibraryIndex_searchTimedOut()) {
+    } else if (!search_timeout_fired) {
         show_toast("No matches found");
         *state = SEARCH_STATE_QUERY;
     } else if (search_results.nested_count > 0 || search_results.mixed_count > 0) {
@@ -170,10 +176,12 @@ static void poll_search_progress(SearchState* state, int* results_selected,
 
     if (!search_timeout_fired && elapsed >= SEARCH_TIMEOUT_MS) {
         LibraryIndex_searchAbort();
+        LibraryIndex_searchMarkTimedOut();
         search_timeout_fired = true;
     }
 
     if (search_worker_done) {
+        finish_search_thread();
         complete_search(state, results_selected, results_scroll, dirty);
     }
 }
@@ -211,15 +219,19 @@ static void load_detail_from_row(const SearchResultRow* row) {
     if (row->type == SEARCH_ITEM_TRACK) {
         detail_is_single_track = true;
         strncpy(detail_title, row->label, sizeof(detail_title) - 1);
+        detail_title[sizeof(detail_title) - 1] = '\0';
         PlaylistTrack* tr = &detail_tracks[0];
         strncpy(tr->path, row->path, sizeof(tr->path) - 1);
+        tr->path[sizeof(tr->path) - 1] = '\0';
         strncpy(tr->name, row->label, sizeof(tr->name) - 1);
+        tr->name[sizeof(tr->name) - 1] = '\0';
         tr->format = row->format;
         detail_track_count = 1;
         return;
     }
 
     strncpy(detail_m3u_path, row->path, sizeof(detail_m3u_path) - 1);
+    detail_m3u_path[sizeof(detail_m3u_path) - 1] = '\0';
     snprintf(detail_title, sizeof(detail_title), "%s", row->label);
     M3U_loadTracks(row->path, detail_tracks, PLAYLIST_MAX_TRACKS, &detail_track_count);
 }
@@ -267,7 +279,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 state = SEARCH_STATE_QUERY;
                 dirty = 1;
             }
-            if (PAD_justPressed(BTN_B)) return MODULE_EXIT_TO_MENU;
+            if (PAD_justPressed(BTN_B)) {
+                cancel_search();
+                return MODULE_EXIT_TO_MENU;
+            }
         }
         else if (state == SEARCH_STATE_QUERY) {
             if (PAD_justPressed(BTN_A)) {
@@ -335,6 +350,7 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 }
             }
             else if (PAD_justPressed(BTN_B)) {
+                cancel_search();
                 state = SEARCH_STATE_QUERY;
                 dirty = 1;
             }
@@ -366,7 +382,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 }
                 ModuleExitReason reason = PlayerModule_runWithPlaylist(
                     screen, detail_tracks, detail_track_count, detail_selected);
-                if (reason == MODULE_EXIT_QUIT) return MODULE_EXIT_QUIT;
+                if (reason == MODULE_EXIT_QUIT) {
+                    cancel_search();
+                    return MODULE_EXIT_QUIT;
+                }
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_B)) {

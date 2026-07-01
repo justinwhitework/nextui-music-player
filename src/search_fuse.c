@@ -1,6 +1,5 @@
 #include "search_fuse.h"
 #include <string.h>
-#include <ctype.h>
 
 #define FUSE_THRESHOLD 0.4f
 

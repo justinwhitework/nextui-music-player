@@ -33,8 +33,11 @@
 #define META_TMP INDEX_DIR "/index.meta.tmp"
 #define LEGACY_JSON SHARED_USERDATA_PATH "/music-player/library_index.json"
 
-#define TSV_LINE_MAX 1024
+#define TSV_LINE_MAX 1408
 #define ABORT_CHECK_EVERY 256
+
+static SearchResultRow search_nested_heap[LIBRARY_SEARCH_MAX_TOP];
+static SearchResultRow search_mixed_heap[LIBRARY_SEARCH_MAX_MIXED];
 
 typedef struct {
     uint64_t file_count;
@@ -47,6 +50,7 @@ typedef struct {
 } QueryCollectCtx;
 
 static pthread_mutex_t index_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t search_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool build_started = false;
 static bool build_running = false;
 static bool index_ready = false;
@@ -179,6 +183,10 @@ static bool parse_meta_file(const char* path, IndexMeta* meta) {
         if (sscanf(line, "playlists_truncated=%d", &meta->playlists_truncated) == 1) continue;
     }
     fclose(f);
+    if (meta->song_count < 0) meta->song_count = 0;
+    if (meta->playlist_count < 0) meta->playlist_count = 0;
+    if (meta->song_count > INDEX_MAX_ROWS) meta->song_count = INDEX_MAX_ROWS;
+    if (meta->playlist_count > INDEX_MAX_ROWS) meta->playlist_count = INDEX_MAX_ROWS;
     return meta->version == 1 && meta->fingerprint[0];
 }
 
@@ -198,6 +206,10 @@ static bool write_meta_tmp(const char* fp_str, int song_count, int playlist_coun
                            int songs_truncated, int playlists_truncated) {
     FILE* f = fopen(META_TMP, "w");
     if (!f) return false;
+    if (song_count < 0) song_count = 0;
+    if (playlist_count < 0) playlist_count = 0;
+    if (song_count > INDEX_MAX_ROWS) song_count = INDEX_MAX_ROWS;
+    if (playlist_count > INDEX_MAX_ROWS) playlist_count = INDEX_MAX_ROWS;
     fprintf(f, "version=1\n");
     fprintf(f, "fingerprint=%s\n", fp_str);
     fprintf(f, "song_count=%d\n", song_count);
@@ -224,6 +236,14 @@ static bool commit_index_files(void) {
     return true;
 }
 
+static bool tsv_line_complete(const char* line, FILE* fp) {
+    if (!line || !line[0]) return true;
+    size_t len = strlen(line);
+    if (len < TSV_LINE_MAX - 1) return true;
+    if (line[len - 1] == '\n') return true;
+    return feof(fp) != 0;
+}
+
 static int parse_tsv_fields(char* line, char** fields, int max_fields) {
     int count = 0;
     char* p = line;
@@ -245,6 +265,7 @@ static int parse_tsv_fields(char* line, char** fields, int max_fields) {
 
 static void collect_query_token(const char* token, void* userdata) {
     QueryCollectCtx* ctx = (QueryCollectCtx*)userdata;
+    if (!ctx || !token) return;
     if (ctx->count >= 32) return;
     strncpy(ctx->tokens[ctx->count], token, SEARCH_FUSE_TOKEN_MAX - 1);
     ctx->tokens[ctx->count][SEARCH_FUSE_TOKEN_MAX - 1] = '\0';
@@ -259,6 +280,9 @@ static int compare_row_score(const void* a, const void* b) {
 }
 
 static void topk_insert(SearchResultRow* heap, int* count, int max_count, const SearchResultRow* item) {
+    if (!heap || !count || !item || max_count <= 0) return;
+    if (*count < 0) *count = 0;
+    if (*count > max_count) *count = max_count;
     if (item->score < SEARCH_FUSE_MIN_SCORE) return;
 
     if (*count < max_count) {
@@ -277,17 +301,15 @@ static void topk_insert(SearchResultRow* heap, int* count, int max_count, const 
 
 static bool search_should_abort(int row_index) {
     if ((row_index & (ABORT_CHECK_EVERY - 1)) != 0) return false;
-    if (search_abort) {
-        search_timed_out = true;
-        return true;
-    }
-    return false;
+    return search_abort;
 }
 
 static int score_playlist_row(const char* path, const char* title,
                               const char query_norm[256],
                               const char query_tokens[][SEARCH_FUSE_TOKEN_MAX],
                               int query_token_count) {
+    if (!path) return 0;
+
     char name_norm[128];
     char parent_norm[64];
     char file_norm[128];
@@ -317,20 +339,23 @@ static int score_playlist_row(const char* path, const char* title,
 static void fill_song_result(SearchResultRow* row, const char* path,
                              const char* title, const char* album, const char* artist,
                              int score) {
+    if (!row || !path) return;
     memset(row, 0, sizeof(*row));
     row->type = SEARCH_ITEM_TRACK;
     row->score = score;
     strncpy(row->path, path, sizeof(row->path) - 1);
+    row->path[sizeof(row->path) - 1] = '\0';
 
     const char* base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    strncpy(row->label, title[0] ? title : base, sizeof(row->label) - 1);
+    strncpy(row->label, (title && title[0]) ? title : base, sizeof(row->label) - 1);
+    row->label[sizeof(row->label) - 1] = '\0';
 
-    if (artist[0] && album[0]) {
+    if (artist && artist[0] && album && album[0]) {
         snprintf(row->subtitle, sizeof(row->subtitle), "%s — %s", artist, album);
-    } else if (artist[0]) {
+    } else if (artist && artist[0]) {
         snprintf(row->subtitle, sizeof(row->subtitle), "%s", artist);
-    } else if (album[0]) {
+    } else if (album && album[0]) {
         snprintf(row->subtitle, sizeof(row->subtitle), "%s", album);
     }
 
@@ -340,20 +365,22 @@ static void fill_song_result(SearchResultRow* row, const char* path,
 
 static void fill_playlist_result(SearchResultRow* row, const char* path, const char* title,
                                  int track_count, bool is_root, int score) {
+    if (!row || !path) return;
     memset(row, 0, sizeof(*row));
     row->type = is_root ? SEARCH_ITEM_USER_PLAYLIST : SEARCH_ITEM_NESTED_PLAYLIST;
     row->score = score;
     strncpy(row->path, path, sizeof(row->path) - 1);
-    row->track_count = track_count;
+    row->path[sizeof(row->path) - 1] = '\0';
+    row->track_count = track_count < 0 ? 0 : track_count;
     row->format = AUDIO_FORMAT_UNKNOWN;
 
     char parent_folder[64];
     M3U_getPlaylistParentFolder(path, parent_folder, sizeof(parent_folder));
 
     if (!is_root && parent_folder[0]) {
-        snprintf(row->label, sizeof(row->label), "%s / %s", parent_folder, title);
+        snprintf(row->label, sizeof(row->label), "%s / %s", parent_folder, title ? title : "");
     } else {
-        snprintf(row->label, sizeof(row->label), "%s", title);
+        snprintf(row->label, sizeof(row->label), "%s", title ? title : "");
     }
     snprintf(row->subtitle, sizeof(row->subtitle), "%d tracks", track_count);
 }
@@ -379,6 +406,11 @@ static bool rebuild_index(const char* fp_str) {
         }
 
         for (int i = 0; i < write_count; i++) {
+            if (songs_written >= INDEX_MAX_ROWS) {
+                songs_truncated = 1;
+                break;
+            }
+            if (!paths || !paths[i]) continue;
             if ((i & 255) == 0) {
                 char msg[128];
                 snprintf(msg, sizeof(msg), "Indexing songs %d/%d", i + 1, write_count);
@@ -399,6 +431,7 @@ static bool rebuild_index(const char* fp_str) {
             base = base ? base + 1 : paths[i];
             char stem[256];
             strncpy(stem, base, sizeof(stem) - 1);
+            stem[sizeof(stem) - 1] = '\0';
             char* ext = strrchr(stem, '.');
             if (ext) *ext = '\0';
 
@@ -438,6 +471,7 @@ static bool rebuild_index(const char* fp_str) {
         PlaylistInfo* infos = calloc(limit, sizeof(PlaylistInfo));
         if (infos) {
             int n = M3U_listAllPlaylists(infos, limit, Settings_getPlaylistScanDepth());
+            if (n < 0) n = 0;
             if (n > INDEX_MAX_ROWS) {
                 playlists_truncated = 1;
                 n = INDEX_MAX_ROWS;
@@ -449,6 +483,7 @@ static bool rebuild_index(const char* fp_str) {
                     playlists_truncated = 1;
                     break;
                 }
+                if (!infos[i].path[0]) continue;
 
                 char path_field[512];
                 char title_field[256];
@@ -559,6 +594,7 @@ bool LibraryIndex_requestRebuild(void) {
 }
 
 void LibraryIndex_quit(void) {
+    LibraryIndex_searchAbort();
     index_ready = false;
     build_started = false;
 }
@@ -585,6 +621,10 @@ void LibraryIndex_searchAbort(void) {
     search_abort = true;
 }
 
+void LibraryIndex_searchMarkTimedOut(void) {
+    search_timed_out = true;
+}
+
 void LibraryIndex_searchClearAbort(void) {
     search_abort = false;
     search_timed_out = false;
@@ -601,16 +641,21 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     if (!LibraryIndex_isReady()) return false;
     if (!file_exists(SONGS_TSV) && !file_exists(PLAYLISTS_TSV)) return false;
 
+    if (pthread_mutex_lock(&search_mutex) != 0) return false;
+
     char query_tokens[32][SEARCH_FUSE_TOKEN_MAX];
     QueryCollectCtx qctx = {.tokens = query_tokens, .count = 0};
     Metadata_foreachToken(query, collect_query_token, &qctx);
-    if (qctx.count == 0) return false;
+    if (qctx.count == 0) {
+        pthread_mutex_unlock(&search_mutex);
+        return false;
+    }
 
     char query_norm[256];
     Metadata_copyNormalized(query_norm, sizeof(query_norm), query);
 
-    SearchResultRow nested_heap[LIBRARY_SEARCH_MAX_TOP];
-    SearchResultRow mixed_heap[LIBRARY_SEARCH_MAX_MIXED];
+    SearchResultRow* nested_heap = search_nested_heap;
+    SearchResultRow* mixed_heap = search_mixed_heap;
     int nested_n = 0;
     int mixed_n = 0;
 
@@ -621,6 +666,10 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
         while (fgets(line, sizeof(line), songs_fp)) {
             if (row >= INDEX_MAX_ROWS) break;
             if (search_should_abort(row)) break;
+            if (!tsv_line_complete(line, songs_fp)) {
+                row++;
+                continue;
+            }
 
             char* fields[4];
             if (parse_tsv_fields(line, fields, 4) < 4) {
@@ -629,6 +678,10 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
             }
 
             const char* path = fields[0];
+            if (!path[0]) {
+                row++;
+                continue;
+            }
             const char* title = fields[1];
             const char* album = fields[2];
             const char* artist = fields[3];
@@ -674,6 +727,10 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
             while (fgets(line, sizeof(line), pl_fp)) {
                 if (row >= INDEX_MAX_ROWS) break;
                 if (search_should_abort(row)) break;
+                if (!tsv_line_complete(line, pl_fp)) {
+                    row++;
+                    continue;
+                }
 
                 char* fields[4];
                 if (parse_tsv_fields(line, fields, 4) < 4) {
@@ -682,8 +739,13 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
                 }
 
                 const char* path = fields[0];
+                if (!path[0]) {
+                    row++;
+                    continue;
+                }
                 const char* title = fields[1];
                 int track_count = atoi(fields[2]);
+                if (track_count < 0) track_count = 0;
                 bool is_root = atoi(fields[3]) != 0;
 
                 int score = score_playlist_row(path, title, query_norm, query_tokens, qctx.count);
@@ -702,6 +764,9 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
         }
     }
 
+    if (nested_n > LIBRARY_SEARCH_MAX_TOP) nested_n = LIBRARY_SEARCH_MAX_TOP;
+    if (mixed_n > LIBRARY_SEARCH_MAX_MIXED) mixed_n = LIBRARY_SEARCH_MAX_MIXED;
+
     if (nested_n > 1) qsort(nested_heap, nested_n, sizeof(SearchResultRow), compare_row_score);
     if (mixed_n > 1) qsort(mixed_heap, mixed_n, sizeof(SearchResultRow), compare_row_score);
 
@@ -719,5 +784,6 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
         out->mixed[i] = mixed_heap[i];
     }
 
+    pthread_mutex_unlock(&search_mutex);
     return out->nested_count > 0 || out->mixed_count > 0;
 }

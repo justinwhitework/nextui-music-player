@@ -44,6 +44,7 @@ const char* LibraryIndex_getBuildStatus(void);
 bool LibraryIndex_search(const char* query, SearchResults* out);
 
 void LibraryIndex_searchAbort(void);
+void LibraryIndex_searchMarkTimedOut(void);
 void LibraryIndex_searchClearAbort(void);
 bool LibraryIndex_searchTimedOut(void);
 
