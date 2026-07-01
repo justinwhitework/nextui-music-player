@@ -92,7 +92,8 @@ typedef struct {
 
 typedef struct TokenHashNode {
     int token_idx;
-    struct TokenHashNode* next;
+    struct TokenHashNode* hash_next;
+    struct TokenHashNode* char_next;
 } TokenHashNode;
 
 #pragma pack(push, 1)
@@ -385,30 +386,35 @@ static int token_first_char_bucket(const char* token) {
     return 36;
 }
 
-static bool token_hash_node_push(int token_idx, TokenHashNode*** head) {
-    if (token_idx < 0 || token_idx >= token_count || !head) return false;
+static bool token_node_link(int token_idx) {
+    if (token_idx < 0 || token_idx >= token_count) return false;
 
     if (token_hash_node_count >= token_hash_node_cap) {
         int nc = token_hash_node_cap ? token_hash_node_cap * 2 : TOKEN_INIT_CAP;
         TokenHashNode* nn = realloc(token_hash_nodes, sizeof(TokenHashNode) * nc);
         if (!nn) {
-            index_log("token_index: hash node realloc failed");
+            index_logf("token_index: node pool realloc failed need=%d cap=%d",
+                       token_hash_node_count + 1, token_hash_node_cap);
             return false;
         }
         token_hash_nodes = nn;
         token_hash_node_cap = nc;
+        index_logf("token_index: node pool grown cap=%d", token_hash_node_cap);
     }
 
     TokenHashNode* node = &token_hash_nodes[token_hash_node_count++];
     node->token_idx = token_idx;
-    node->next = *head;
-    *head = node;
-    return true;
-}
+    node->hash_next = NULL;
+    node->char_next = NULL;
 
-static void token_first_char_insert(int token_idx) {
-    int bucket = token_first_char_bucket(tokens[token_idx].token);
-    token_hash_node_push(token_idx, &token_first_char[bucket]);
+    uint32_t bucket = hash_token_string(tokens[token_idx].token) % TOKEN_HASH_BUCKETS;
+    node->hash_next = token_hash[bucket];
+    token_hash[bucket] = node;
+
+    int fc = token_first_char_bucket(tokens[token_idx].token);
+    node->char_next = token_first_char[fc];
+    token_first_char[fc] = node;
+    return true;
 }
 
 static void free_index_data(void) {
@@ -432,18 +438,11 @@ static void free_index_data(void) {
     token_hash_clear();
 }
 
-static void token_hash_insert(int token_idx) {
-    if (token_idx < 0 || token_idx >= token_count) return;
-    uint32_t bucket = hash_token_string(tokens[token_idx].token) % TOKEN_HASH_BUCKETS;
-    token_hash_node_push(token_idx, &token_hash[bucket]);
-    token_first_char_insert(token_idx);
-}
-
 static int find_token(const char* token) {
     if (!token || !token[0]) return -1;
 
     uint32_t bucket = hash_token_string(token) % TOKEN_HASH_BUCKETS;
-    for (TokenHashNode* n = token_hash[bucket]; n; n = n->next) {
+    for (TokenHashNode* n = token_hash[bucket]; n; n = n->hash_next) {
         if (strcmp(tokens[n->token_idx].token, token) == 0) {
             return n->token_idx;
         }
@@ -474,7 +473,10 @@ static int ensure_token(const char* token) {
     idx = token_count++;
     memset(&tokens[idx], 0, sizeof(tokens[idx]));
     strncpy(tokens[idx].token, token, sizeof(tokens[idx].token) - 1);
-    token_hash_insert(idx);
+    if (!token_node_link(idx)) {
+        token_count--;
+        return -1;
+    }
     return idx;
 }
 
@@ -561,7 +563,11 @@ static void index_track_tokens_verbose(int id) {
     index_log_stats("after title tokens", id);
 
     Metadata_foreachNormalizedToken(tr->artist_norm, add_token_cb, &ctx);
+    index_log_stats("after artist tokens", id);
+
     Metadata_foreachNormalizedToken(tr->album_norm, add_token_cb, &ctx);
+    index_log_stats("after album tokens", id);
+
     Metadata_foreachNormalizedToken(tr->genre_norm, add_token_cb, &ctx);
     Metadata_foreachNormalizedToken(tr->filename_norm, add_token_cb, &ctx);
     index_phrase_token(tr->title_norm, id);
@@ -1514,7 +1520,7 @@ static void apply_query_token(const char* query_token, bool fuzzy,
 
     int max_err = SearchFuse_maxEditErrors(strlen(query_token), true);
     int bucket = token_first_char_bucket(query_token);
-    for (TokenHashNode* n = token_first_char[bucket]; n; n = n->next) {
+    for (TokenHashNode* n = token_first_char[bucket]; n; n = n->char_next) {
         if (n->token_idx == exact) continue;
         const char* candidate = tokens[n->token_idx].token;
         if (!SearchFuse_withinEditDistance(query_token, candidate, max_err)) continue;

@@ -61,6 +61,10 @@ bool Playlist_isIndexSidecar(const char* filename) {
     if (strcasecmp(dot, ".webm") == 0) return true;
     if (strcasecmp(dot, ".jpg") == 0) return true;
     if (strcasecmp(dot, ".jpeg") == 0) return true;
+
+    if (strstr(filename, ".temp.") != NULL) return true;
+    if (len > 5 && strcasecmp(filename + len - 5, ".part") == 0) return true;
+    if (len > 10 && strcasecmp(filename + len - 10, ".crdownload") == 0) return true;
     return false;
 }
 
