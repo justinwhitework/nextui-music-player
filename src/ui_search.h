@@ -25,6 +25,8 @@ void render_search_home(SDL_Surface* screen, int show_setting, int selected, int
 void render_search_rebuilding(SDL_Surface* screen, int show_setting, const char* status,
                               bool show_log, int log_scroll);
 
+void render_search_searching(SDL_Surface* screen, int show_setting, const char* query);
+
 void render_search_results(SDL_Surface* screen, int show_setting,
                            const char* query,
                            const SearchResults* results,

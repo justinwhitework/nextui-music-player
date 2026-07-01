@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "defines.h"
 #include "api.h"
@@ -22,10 +23,14 @@ typedef enum {
     SEARCH_STATE_BUILDING,
     SEARCH_STATE_FAILED,
     SEARCH_STATE_QUERY,
+    SEARCH_STATE_SEARCHING,
     SEARCH_STATE_RESULTS,
     SEARCH_STATE_DETAIL,
     SEARCH_STATE_REBUILDING
 } SearchState;
+
+#define SEARCH_WARN_MS     10000
+#define SEARCH_TIMEOUT_MS  20000
 
 #define SEARCH_BUILD_HELP  56
 #define SEARCH_QUERY_HELP  57
@@ -88,6 +93,15 @@ static bool handle_index_build_input(SDL_Surface* screen, bool building) {
     return false;
 }
 
+static pthread_t search_thread;
+static bool search_thread_active = false;
+static volatile bool search_worker_done = false;
+static volatile bool search_worker_ok = false;
+static SearchResults search_worker_results;
+static uint32_t search_started_ticks = 0;
+static bool search_warn_shown = false;
+static bool search_timeout_fired = false;
+
 static bool results_index_is_header(const SearchResults* results, int idx) {
     return results && results->nested_count > 0 && idx == 0;
 }
@@ -125,6 +139,106 @@ static void results_move_selection(const SearchResults* results, int* selected, 
 static void show_toast(const char* msg) {
     snprintf(search_toast, sizeof(search_toast), "%s", msg ? msg : "");
     search_toast_time = SDL_GetTicks();
+}
+
+static void finish_search_thread(void) {
+    if (!search_thread_active) return;
+    pthread_join(search_thread, NULL);
+    search_thread_active = false;
+}
+
+static void* search_worker_func(void* arg) {
+    (void)arg;
+    PWR_pinToCores(CPU_CORE_EFFICIENCY);
+    search_worker_ok = LibraryIndex_search(search_query, &search_worker_results);
+    search_worker_done = true;
+    return NULL;
+}
+
+static void begin_search(void) {
+    finish_search_thread();
+
+    search_worker_done = false;
+    search_worker_ok = false;
+    memset(&search_worker_results, 0, sizeof(search_worker_results));
+    LibraryIndex_searchClearAbort();
+
+    search_started_ticks = SDL_GetTicks();
+    search_warn_shown = false;
+    search_timeout_fired = false;
+
+    if (pthread_create(&search_thread, NULL, search_worker_func, NULL) == 0) {
+        search_thread_active = true;
+    } else {
+        search_worker_done = true;
+        search_worker_ok = LibraryIndex_search(search_query, &search_worker_results);
+    }
+}
+
+static void cancel_search(void) {
+    LibraryIndex_searchAbort();
+    finish_search_thread();
+    LibraryIndex_searchClearAbort();
+    search_worker_done = false;
+    search_timeout_fired = false;
+}
+
+static void complete_search(SearchState* state, int* results_selected, int* results_scroll, int* dirty) {
+    bool ok = search_worker_ok;
+    SearchResults results = search_worker_results;
+
+    search_worker_done = false;
+
+    memcpy(&search_results, &results, sizeof(search_results));
+
+    if (search_timeout_fired) {
+        show_toast("Search timed out");
+    }
+
+    if (ok) {
+        SearchResultRow top;
+        const SearchResultRow* top_ptr = NULL;
+        if (search_results_top_result(&search_results, &top)) {
+            top_ptr = &top;
+        }
+        SearchHistory_add(search_query, top_ptr);
+
+        *results_selected = results_first_selectable(&search_results);
+        *results_scroll = 0;
+        *state = SEARCH_STATE_RESULTS;
+    } else if (!search_timeout_fired) {
+        show_toast("No matches found");
+        *state = SEARCH_STATE_QUERY;
+    } else if (search_results.nested_count > 0 || search_results.mixed_count > 0) {
+        *results_selected = results_first_selectable(&search_results);
+        *results_scroll = 0;
+        *state = SEARCH_STATE_RESULTS;
+    } else {
+        *state = SEARCH_STATE_QUERY;
+    }
+    *dirty = 1;
+}
+
+static void poll_search_progress(SearchState* state, int* results_selected,
+                                 int* results_scroll, int* dirty) {
+    uint32_t elapsed = SDL_GetTicks() - search_started_ticks;
+
+    if (!search_warn_shown && elapsed >= SEARCH_WARN_MS) {
+        show_toast("Search is taking longer than usual");
+        search_warn_shown = true;
+        *dirty = 1;
+    }
+
+    if (!search_timeout_fired && elapsed >= SEARCH_TIMEOUT_MS) {
+        LibraryIndex_searchAbort();
+        LibraryIndex_searchMarkTimedOut();
+        search_timeout_fired = true;
+    }
+
+    if (search_worker_done) {
+        finish_search_thread();
+        complete_search(state, results_selected, results_scroll, dirty);
+    }
 }
 
 static void open_keyboard(SDL_Surface** screen, char* out_query, int out_size) {
@@ -168,22 +282,11 @@ static bool run_search_query(const char* query, SearchState* state,
     strncpy(search_query, query, sizeof(search_query) - 1);
     search_query[sizeof(search_query) - 1] = '\0';
 
-    if (LibraryIndex_search(search_query, &search_results)) {
-        SearchResultRow top;
-        const SearchResultRow* top_ptr = NULL;
-        if (search_results_top_result(&search_results, &top)) {
-            top_ptr = &top;
-        }
-        SearchHistory_add(search_query, top_ptr);
-
-        *results_selected = results_first_selectable(&search_results);
-        *results_scroll = 0;
-        *state = SEARCH_STATE_RESULTS;
-        return true;
-    }
-
-    show_toast("No matches found");
-    return false;
+    begin_search();
+    *state = SEARCH_STATE_SEARCHING;
+    (void)results_selected;
+    (void)results_scroll;
+    return true;
 }
 
 static void load_detail_from_row(const SearchResultRow* row) {
@@ -198,15 +301,19 @@ static void load_detail_from_row(const SearchResultRow* row) {
     if (row->type == SEARCH_ITEM_TRACK) {
         detail_is_single_track = true;
         strncpy(detail_title, row->label, sizeof(detail_title) - 1);
+        detail_title[sizeof(detail_title) - 1] = '\0';
         PlaylistTrack* tr = &detail_tracks[0];
         strncpy(tr->path, row->path, sizeof(tr->path) - 1);
+        tr->path[sizeof(tr->path) - 1] = '\0';
         strncpy(tr->name, row->label, sizeof(tr->name) - 1);
+        tr->name[sizeof(tr->name) - 1] = '\0';
         tr->format = row->format;
         detail_track_count = 1;
         return;
     }
 
     strncpy(detail_m3u_path, row->path, sizeof(detail_m3u_path) - 1);
+    detail_m3u_path[sizeof(detail_m3u_path) - 1] = '\0';
     snprintf(detail_title, sizeof(detail_title), "%s", row->label);
     M3U_loadTracks(row->path, detail_tracks, PLAYLIST_MAX_TRACKS, &detail_track_count);
 }
@@ -319,13 +426,17 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
             case SEARCH_STATE_BUILDING: help_state = SEARCH_BUILD_HELP; break;
             case SEARCH_STATE_FAILED: help_state = SEARCH_BUILD_HELP; break;
             case SEARCH_STATE_QUERY: help_state = SEARCH_QUERY_HELP; break;
+            case SEARCH_STATE_SEARCHING: help_state = SEARCH_QUERY_HELP; break;
             case SEARCH_STATE_RESULTS: help_state = SEARCH_RESULTS_HELP; break;
             case SEARCH_STATE_REBUILDING: help_state = SEARCH_QUERY_HELP; break;
             default: help_state = SEARCH_DETAIL_HELP; break;
         }
 
         GlobalInputResult global = ModuleCommon_handleGlobalInput(screen, &show_setting, help_state);
-        if (global.should_quit) return MODULE_EXIT_QUIT;
+        if (global.should_quit) {
+            cancel_search();
+            return MODULE_EXIT_QUIT;
+        }
         if (global.input_consumed) {
             if (global.dirty) dirty = 1;
             GFX_sync();
@@ -351,7 +462,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 show_index_log = false;
                 dirty = 1;
             }
-            if (PAD_justPressed(BTN_B)) return MODULE_EXIT_TO_MENU;
+            if (PAD_justPressed(BTN_B)) {
+                cancel_search();
+                return MODULE_EXIT_TO_MENU;
+            }
         }
         else if (state == SEARCH_STATE_REBUILDING) {
             dirty = 1;
@@ -399,7 +513,17 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 dirty = 1;
             }
             else if (PAD_justPressed(BTN_B)) {
+                cancel_search();
                 return MODULE_EXIT_TO_MENU;
+            }
+        }
+        else if (state == SEARCH_STATE_SEARCHING) {
+            dirty = 1;
+            poll_search_progress(&state, &results_selected, &results_scroll, &dirty);
+            if (PAD_justPressed(BTN_B)) {
+                cancel_search();
+                state = SEARCH_STATE_QUERY;
+                dirty = 1;
             }
         }
         else if (state == SEARCH_STATE_RESULTS) {
@@ -481,7 +605,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                 }
                 ModuleExitReason reason = PlayerModule_runWithPlaylist(
                     screen, detail_tracks, detail_track_count, detail_selected);
-                if (reason == MODULE_EXIT_QUIT) return MODULE_EXIT_QUIT;
+                if (reason == MODULE_EXIT_QUIT) {
+                    cancel_search();
+                    return MODULE_EXIT_QUIT;
+                }
                 {
                     SDL_Surface* ns = DisplayHelper_getReinitScreen();
                     if (ns) screen = ns;
@@ -519,6 +646,9 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                     render_search_home(screen, show_setting, home_selected, home_scroll);
                     break;
                 }
+                case SEARCH_STATE_SEARCHING:
+                    render_search_searching(screen, show_setting, search_query);
+                    break;
                 case SEARCH_STATE_RESULTS: {
                     int items_per_page = calc_list_layout(screen).items_per_page;
                     adjust_list_scroll(results_selected, &results_scroll, items_per_page);
@@ -546,6 +676,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
             GFX_flip(screen);
             dirty = 0;
             ModuleCommon_tickToast(search_toast, search_toast_time, &dirty);
+        } else if (state == SEARCH_STATE_SEARCHING) {
+            poll_search_progress(&state, &results_selected, &results_scroll, &dirty);
+            if (dirty) continue;
+            GFX_sync();
         } else {
             GFX_sync();
         }

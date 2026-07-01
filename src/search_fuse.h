@@ -16,16 +16,12 @@ typedef struct {
     const char* filename;
 } SearchFuseFields;
 
-// Fuse.js-style threshold: allow ~40% relative edit distance (threshold 0.4).
 int SearchFuse_maxEditErrors(size_t pattern_len, bool fuzzy);
 
-// True if strings are within max_err edits (Levenshtein).
 bool SearchFuse_withinEditDistance(const char* a, const char* b, int max_err);
 
-// Match quality 0-100 (100 = best). Pattern truncated to SEARCH_FUSE_PATTERN_MAX.
 int SearchFuse_matchScore(const char* text, const char* pattern, bool fuzzy);
 
-// Weighted multi-key score (fuse.js keys + token search). Returns 0-100.
 int SearchFuse_scoreFields(const SearchFuseFields* fields,
                            const char* query_norm,
                            const char query_tokens[][SEARCH_FUSE_TOKEN_MAX],

@@ -1,6 +1,5 @@
 #include "search_fuse.h"
 #include <string.h>
-#include <ctype.h>
 
 #define FUSE_THRESHOLD 0.4f
 
@@ -24,7 +23,6 @@ bool SearchFuse_withinEditDistance(const char* a, const char* b, int max_err) {
 
     if ((la > lb ? la - lb : lb - la) > (size_t)max_err) return false;
 
-    size_t rows = la + 1;
     size_t cols = lb + 1;
     int prev[49];
     int curr[49];
