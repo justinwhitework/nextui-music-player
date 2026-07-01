@@ -47,6 +47,7 @@ const char* Settings_getSoftLimiterDisplayStr(void);
 int Settings_getMaxPlaylists(void);
 int Settings_getPlaylistScanDepth(void);
 bool Settings_getIndexLog(void);
+int Settings_getIndexMemMb(void);
 
 // Playlist detail background from sidecar artwork
 bool Settings_getPlaylistBgArtwork(void);

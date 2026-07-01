@@ -261,7 +261,7 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
 
             case SETTINGS_STATE_REBUILDING_INDEX:
                 settings_handle_index_build_input(screen);
-                if (LibraryIndex_isReady() && !LibraryIndex_isBuilding()) {
+                if ((LibraryIndex_isReady() || LibraryIndex_isFailed()) && !LibraryIndex_isBuilding()) {
                     state = SETTINGS_STATE_MENU;
                     settings_show_index_log = false;
                     dirty = 1;

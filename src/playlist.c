@@ -341,8 +341,21 @@ static bool skip_dirent_name(const char* name, bool include_hidden) {
 }
 
 // Recursive helper for Playlist_collectPaths
+static bool paths_ensure_cap(char*** out_paths, int* cap, int count, int max_count) {
+    if (!out_paths || !cap || count < *cap) return true;
+    if (*cap >= max_count) return false;
+    int new_cap = *cap * 2;
+    if (new_cap > max_count) new_cap = max_count;
+    if (new_cap <= *cap) return false;
+    char** grown = realloc(*out_paths, sizeof(char*) * (size_t)new_cap);
+    if (!grown) return false;
+    *out_paths = grown;
+    *cap = new_cap;
+    return true;
+}
+
 static void collect_paths_recursive(const char* path, int depth,
-                                    char*** out_paths, int* count, int max_count,
+                                    char*** out_paths, int* cap, int* count, int max_count,
                                     bool include_hidden) {
     if (depth > PLAYLIST_MAX_DEPTH || *count >= max_count) return;
 
@@ -398,6 +411,7 @@ static void collect_paths_recursive(const char* path, int depth,
     if (dir_count  > 1) qsort(dirs,  dir_count,  sizeof(char*), compare_strings);
 
     for (int i = 0; i < file_count && *count < max_count; i++) {
+        if (!paths_ensure_cap(out_paths, cap, *count, max_count)) break;
         char full_path[512];
         snprintf(full_path, sizeof(full_path), "%s/%s", path, files[i]);
         (*out_paths)[*count] = strdup(full_path);
@@ -406,7 +420,7 @@ static void collect_paths_recursive(const char* path, int depth,
     for (int i = 0; i < dir_count && *count < max_count; i++) {
         char full_path[512];
         snprintf(full_path, sizeof(full_path), "%s/%s", path, dirs[i]);
-        collect_paths_recursive(full_path, depth + 1, out_paths, count, max_count, include_hidden);
+        collect_paths_recursive(full_path, depth + 1, out_paths, cap, count, max_count, include_hidden);
     }
 
     for (int i = 0; i < file_count; i++) free(files[i]);
@@ -418,11 +432,12 @@ static void collect_paths_recursive(const char* path, int depth,
 int Playlist_collectPathsEx(const char* dir_path, char*** out_paths, int max_count, bool include_hidden) {
     if (!dir_path || !out_paths || max_count <= 0) return 0;
 
-    *out_paths = malloc(sizeof(char*) * max_count);
+    int cap = max_count < 256 ? max_count : 256;
+    *out_paths = malloc(sizeof(char*) * (size_t)cap);
     if (!*out_paths) return 0;
 
     int count = 0;
-    collect_paths_recursive(dir_path, 0, out_paths, &count, max_count, include_hidden);
+    collect_paths_recursive(dir_path, 0, out_paths, &cap, &count, max_count, include_hidden);
     return count;
 }
 

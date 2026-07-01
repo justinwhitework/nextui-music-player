@@ -20,6 +20,7 @@
 
 typedef enum {
     SEARCH_STATE_BUILDING,
+    SEARCH_STATE_FAILED,
     SEARCH_STATE_QUERY,
     SEARCH_STATE_RESULTS,
     SEARCH_STATE_DETAIL,
@@ -151,6 +152,19 @@ static bool run_search_query(const char* query, SearchState* state,
                              int* results_selected, int* results_scroll) {
     if (!query || !query[0]) return false;
 
+    if (LibraryIndex_isFailed()) {
+        show_toast("Search unavailable");
+        return false;
+    }
+    if (LibraryIndex_isBuilding()) {
+        show_toast("Index still building");
+        return false;
+    }
+    if (!LibraryIndex_canSearch()) {
+        show_toast("Search not ready");
+        return false;
+    }
+
     strncpy(search_query, query, sizeof(search_query) - 1);
     search_query[sizeof(search_query) - 1] = '\0';
 
@@ -255,7 +269,12 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
     M3U_init();
     SearchHistory_init();
 
-    SearchState state = LibraryIndex_isReady() ? SEARCH_STATE_QUERY : SEARCH_STATE_BUILDING;
+    SearchState state;
+    if (LibraryIndex_isFailed()) {
+        state = SEARCH_STATE_FAILED;
+    } else {
+        state = LibraryIndex_isReady() ? SEARCH_STATE_QUERY : SEARCH_STATE_BUILDING;
+    }
     int dirty = 1;
     int show_setting = 0;
     int home_selected = 0;
@@ -298,6 +317,7 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
         int help_state;
         switch (state) {
             case SEARCH_STATE_BUILDING: help_state = SEARCH_BUILD_HELP; break;
+            case SEARCH_STATE_FAILED: help_state = SEARCH_BUILD_HELP; break;
             case SEARCH_STATE_QUERY: help_state = SEARCH_QUERY_HELP; break;
             case SEARCH_STATE_RESULTS: help_state = SEARCH_RESULTS_HELP; break;
             case SEARCH_STATE_REBUILDING: help_state = SEARCH_QUERY_HELP; break;
@@ -312,10 +332,12 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
             continue;
         }
 
-        if (state == SEARCH_STATE_BUILDING) {
+        if (state == SEARCH_STATE_BUILDING || state == SEARCH_STATE_FAILED) {
             dirty = 1;
             if (handle_index_build_input(screen, true)) dirty = 1;
-            if (LibraryIndex_isReady()) {
+            if (LibraryIndex_isFailed()) {
+                state = SEARCH_STATE_FAILED;
+            } else if (LibraryIndex_isReady()) {
                 state = SEARCH_STATE_QUERY;
                 show_index_log = false;
                 dirty = 1;
@@ -475,6 +497,10 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
         if (dirty) {
             switch (state) {
                 case SEARCH_STATE_BUILDING:
+                    render_search_building(screen, show_setting, LibraryIndex_getBuildStatus(),
+                                           show_index_log, index_log_scroll);
+                    break;
+                case SEARCH_STATE_FAILED:
                     render_search_building(screen, show_setting, LibraryIndex_getBuildStatus(),
                                            show_index_log, index_log_scroll);
                     break;

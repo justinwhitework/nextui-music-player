@@ -23,7 +23,8 @@
 #include "api.h"
 #include "include/parson/parson.h"
 
-#define LIBRARY_INDEX_FORMAT_VERSION 4
+#define LIBRARY_INDEX_FORMAT_VERSION 5
+#define LIBRARY_INDEX_FORMAT_VERSION_LEGACY 4
 #define MUSIC_PATH SDCARD_PATH "/Music"
 #define INDEX_BIN_PATH SHARED_USERDATA_PATH "/music-player/library_index.bin"
 #define INDEX_BIN_TMP_PATH SHARED_USERDATA_PATH "/music-player/library_index.bin.tmp"
@@ -39,9 +40,21 @@
 #define FUZZY_RESULT_THRESHOLD 3
 #define INDEX_BIN_MAGIC 0x49504D4E
 #define FP_MAX_DEPTH 16
+#define INDEX_FAIL_PATH SHARED_USERDATA_PATH "/music-player/index_failures"
+#define INDEX_MEM_BUDGET_DEFAULT (10 * 1024 * 1024)
+#define TOKEN_MAX_POSTINGS 4096
+#define INDEX_BUILD_MAX_FAILURES 3
 #define INDEX_BUILD_STACK_SIZE (512 * 1024)
 #define BUILD_LOG_MAX_LINES 512
 #define BUILD_LOG_LINE_LEN 160
+
+typedef struct {
+    char title_norm[256];
+    char artist_norm[256];
+    char album_norm[256];
+    char genre_norm[256];
+    char filename_norm[256];
+} TrackNormScratch;
 
 typedef struct {
     char path[512];
@@ -49,11 +62,6 @@ typedef struct {
     char artist[256];
     char album[256];
     char genre[256];
-    char title_norm[256];
-    char artist_norm[256];
-    char album_norm[256];
-    char genre_norm[256];
-    char filename_norm[256];
     AudioFormat format;
     uint64_t file_mtime;
     uint64_t file_size;
@@ -71,12 +79,13 @@ typedef struct {
 
 typedef struct {
     char token[48];
-    int* track_ids;
+    uint16_t* track_ids;
     int track_count;
     int track_cap;
-    int* playlist_ids;
+    uint16_t* playlist_ids;
     int playlist_count;
     int playlist_cap;
+    bool posting_cap_logged;
 } IndexToken;
 
 typedef struct {
@@ -133,6 +142,14 @@ static pthread_mutex_t index_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool build_started = false;
 static bool build_running = false;
 static bool index_ready = false;
+static IndexBuildState build_state = INDEX_STATE_IDLE;
+static int build_failure_count = 0;
+static bool token_index_degraded = false;
+static bool skip_token_index = false;
+static char last_failure_reason[128] = "";
+static char last_ok_path[512] = "";
+static int last_ok_idx = -1;
+static char last_search_error[64] = "";
 
 static IndexedTrack* tracks = NULL;
 static int track_count = 0;
@@ -183,8 +200,8 @@ static int build_log_slot(int index) {
     return (build_log_start + index) % BUILD_LOG_MAX_LINES;
 }
 
-#define INDEX_VERBOSE_TRACKS 64
-#define INDEX_VERBOSE_EVERY 32
+#define INDEX_VERBOSE_TRACKS 32
+#define INDEX_VERBOSE_EVERY 512
 
 static bool index_verbose_step(int next_track_idx) {
     return next_track_idx < INDEX_VERBOSE_TRACKS ||
@@ -240,7 +257,115 @@ static void index_log(const char* msg) {
 static void set_index_ready(bool ready) {
     pthread_mutex_lock(&index_mutex);
     index_ready = ready;
+    if (ready) {
+        build_state = INDEX_STATE_READY;
+    }
     pthread_mutex_unlock(&index_mutex);
+}
+
+static void set_build_state(IndexBuildState state) {
+    pthread_mutex_lock(&index_mutex);
+    build_state = state;
+    index_ready = (state == INDEX_STATE_READY);
+    pthread_mutex_unlock(&index_mutex);
+}
+
+static size_t index_memory_budget_bytes(void) {
+    int mb = Settings_getIndexMemMb();
+    if (mb <= 0) return INDEX_MEM_BUDGET_DEFAULT;
+    return (size_t)mb * 1024U * 1024U;
+}
+
+static size_t index_estimated_bytes(void) {
+    size_t bytes = 0;
+    if (tracks && track_count > 0) {
+        bytes += (size_t)track_count * sizeof(IndexedTrack);
+    }
+    if (tokens && token_cap > 0) {
+        bytes += (size_t)token_cap * sizeof(IndexToken);
+    }
+    if (token_hash_nodes && token_hash_node_cap > 0) {
+        bytes += (size_t)token_hash_node_cap * sizeof(TokenHashNode);
+    }
+    for (int i = 0; i < token_count; i++) {
+        bytes += (size_t)tokens[i].track_cap * sizeof(uint16_t);
+        bytes += (size_t)tokens[i].playlist_cap * sizeof(uint16_t);
+    }
+    if (playlists && playlist_count > 0) {
+        bytes += (size_t)playlist_count * sizeof(IndexedPlaylist);
+    }
+    return bytes;
+}
+
+static bool index_memory_ok(size_t extra) {
+    size_t budget = index_memory_budget_bytes();
+    size_t est = index_estimated_bytes() + extra;
+    return est <= budget;
+}
+
+static void index_log_mem_milestone(int file_idx, int total_files) {
+    if ((file_idx & (INDEX_MEM_LOG_EVERY - 1)) != 0 && file_idx != 0) return;
+    index_logf("INFO mem est=%zuKB tracks=%d tokens=%d budget=%zuKB file=%d/%d",
+               index_estimated_bytes() / 1024U, track_count, token_count,
+               index_memory_budget_bytes() / 1024U, file_idx, total_files);
+}
+
+static bool is_stopword(const char* token) {
+    static const char* const words[] = {
+        "a", "an", "the", "of", "ft", "feat", "featuring",
+        "official", "video", "audio", "lyrics", "lyric",
+        "music", "mv", "hd", "remix", "live"
+    };
+    if (!token || !token[0]) return true;
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+        if (strcmp(token, words[i]) == 0) return true;
+    }
+    return false;
+}
+
+static void fill_track_norms(const IndexedTrack* tr, TrackNormScratch* norms) {
+    if (!tr || !norms) return;
+    memset(norms, 0, sizeof(*norms));
+    Metadata_copyNormalized(norms->title_norm, sizeof(norms->title_norm), tr->title);
+    Metadata_copyNormalized(norms->artist_norm, sizeof(norms->artist_norm), tr->artist);
+    Metadata_copyNormalized(norms->album_norm, sizeof(norms->album_norm), tr->album);
+    Metadata_copyNormalized(norms->genre_norm, sizeof(norms->genre_norm), tr->genre);
+    const char* base = strrchr(tr->path, '/');
+    base = base ? base + 1 : tr->path;
+    Metadata_copyNormalized(norms->filename_norm, sizeof(norms->filename_norm), base);
+}
+
+static void track_path_basename(const IndexedTrack* tr, char* out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!tr) return;
+    const char* base = strrchr(tr->path, '/');
+    base = base ? base + 1 : tr->path;
+    strncpy(out, base, out_size - 1);
+    out[out_size - 1] = '\0';
+}
+
+static void read_failure_count_file(int* out_count) {
+    if (out_count) *out_count = 0;
+    FILE* f = fopen(INDEX_FAIL_PATH, "r");
+    if (!f) return;
+    int count = 0;
+    if (fscanf(f, "%d", &count) == 1 && out_count) {
+        *out_count = count;
+    }
+    fclose(f);
+}
+
+static void write_failure_count_file(int count) {
+    mkdir(SHARED_USERDATA_PATH "/music-player", 0755);
+    FILE* f = fopen(INDEX_FAIL_PATH, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", count);
+    fclose(f);
+}
+
+static void clear_failure_count_file(void) {
+    unlink(INDEX_FAIL_PATH);
 }
 
 static uint64_t fnv1a_update(uint64_t h, const void* data, size_t len) {
@@ -391,6 +516,13 @@ static bool token_node_link(int token_idx) {
 
     if (token_hash_node_count >= token_hash_node_cap) {
         int nc = token_hash_node_cap ? token_hash_node_cap * 2 : TOKEN_INIT_CAP;
+        size_t extra = sizeof(TokenHashNode) * (size_t)(nc - token_hash_node_cap);
+        if (!index_memory_ok(extra)) {
+            token_index_degraded = true;
+            skip_token_index = true;
+            index_log("WARN MEM budget: skip token nodes");
+            return false;
+        }
         TokenHashNode* nn = realloc(token_hash_nodes, sizeof(TokenHashNode) * nc);
         if (!nn) {
             index_logf("token_index: node pool realloc failed need=%d cap=%d",
@@ -460,6 +592,13 @@ static int ensure_token(const char* token) {
 
     if (token_count >= token_cap) {
         int nc = token_cap ? token_cap * 2 : TOKEN_INIT_CAP;
+        size_t extra = sizeof(IndexToken) * (size_t)(nc - token_cap);
+        if (!index_memory_ok(extra)) {
+            token_index_degraded = true;
+            skip_token_index = true;
+            index_log("WARN MEM budget: skip new tokens");
+            return -1;
+        }
         IndexToken* nt = realloc(tokens, sizeof(IndexToken) * nc);
         if (!nt) {
             index_log("token_index: token table realloc failed");
@@ -481,43 +620,69 @@ static int ensure_token(const char* token) {
 }
 
 static void token_add_track(int token_idx, int track_id) {
-    if (token_idx < 0 || track_id < 0) return;
+    if (token_idx < 0 || track_id < 0 || track_id > 65535) return;
+    if (skip_token_index) return;
     IndexToken* t = &tokens[token_idx];
 
+    if (t->track_count >= TOKEN_MAX_POSTINGS) {
+        if (!t->posting_cap_logged) {
+            index_logf("WARN token cap tok=%.32s", t->token);
+            t->posting_cap_logged = true;
+        }
+        return;
+    }
+
     for (int i = 0; i < t->track_count; i++) {
-        if (t->track_ids[i] == track_id) return;
+        if (t->track_ids[i] == (uint16_t)track_id) return;
     }
 
     if (t->track_count >= t->track_cap) {
         int nc = t->track_cap ? t->track_cap * 2 : TOKEN_GROW;
-        int* nd = realloc(t->track_ids, sizeof(int) * nc);
+        size_t extra = sizeof(uint16_t) * (size_t)(nc - t->track_cap);
+        if (!index_memory_ok(extra)) {
+            token_index_degraded = true;
+            index_logf("WARN MEM budget: skip posting tok=%d track=%d", token_idx, track_id);
+            return;
+        }
+        uint16_t* nd = realloc(t->track_ids, sizeof(uint16_t) * (size_t)nc);
         if (!nd) {
-            index_logf("token_index: track_ids realloc failed tok=%d track=%d",
+            index_logf("ERR token_index: track_ids realloc failed tok=%d track=%d",
                        token_idx, track_id);
             return;
         }
         t->track_ids = nd;
         t->track_cap = nc;
     }
-    t->track_ids[t->track_count++] = track_id;
+    t->track_ids[t->track_count++] = (uint16_t)track_id;
 }
 
 static void token_add_playlist(int token_idx, int playlist_id) {
-    if (token_idx < 0 || playlist_id < 0) return;
+    if (token_idx < 0 || playlist_id < 0 || playlist_id > 65535) return;
+    if (skip_token_index) return;
     IndexToken* t = &tokens[token_idx];
 
     for (int i = 0; i < t->playlist_count; i++) {
-        if (t->playlist_ids[i] == playlist_id) return;
+        if (t->playlist_ids[i] == (uint16_t)playlist_id) return;
     }
 
     if (t->playlist_count >= t->playlist_cap) {
         int nc = t->playlist_cap ? t->playlist_cap * 2 : TOKEN_GROW;
-        int* nd = realloc(t->playlist_ids, sizeof(int) * nc);
-        if (!nd) return;
+        size_t extra = sizeof(uint16_t) * (size_t)(nc - t->playlist_cap);
+        if (!index_memory_ok(extra)) {
+            index_logf("WARN MEM budget: skip playlist posting tok=%d pl=%d",
+                         token_idx, playlist_id);
+            return;
+        }
+        uint16_t* nd = realloc(t->playlist_ids, sizeof(uint16_t) * (size_t)nc);
+        if (!nd) {
+            index_logf("ERR token_index: playlist_ids realloc failed tok=%d pl=%d",
+                       token_idx, playlist_id);
+            return;
+        }
         t->playlist_ids = nd;
         t->playlist_cap = nc;
     }
-    t->playlist_ids[t->playlist_count++] = playlist_id;
+    t->playlist_ids[t->playlist_count++] = (uint16_t)playlist_id;
 }
 
 typedef struct {
@@ -526,19 +691,15 @@ typedef struct {
 } TokenAddCtx;
 
 static void add_token_cb(const char* token, void* userdata) {
+    if (!token || !token[0] || is_stopword(token)) return;
     TokenAddCtx* ctx = (TokenAddCtx*)userdata;
     int ti = ensure_token(token);
-    if (ti < 0) return;
+    if (ti < 0) {
+        token_index_degraded = true;
+        return;
+    }
     if (ctx->is_track) token_add_track(ti, ctx->id);
     else token_add_playlist(ti, ctx->id);
-}
-
-static void index_track_norms(IndexedTrack* tr) {
-    if (!tr) return;
-    Metadata_copyNormalized(tr->title_norm, sizeof(tr->title_norm), tr->title);
-    Metadata_copyNormalized(tr->artist_norm, sizeof(tr->artist_norm), tr->artist);
-    Metadata_copyNormalized(tr->album_norm, sizeof(tr->album_norm), tr->album);
-    Metadata_copyNormalized(tr->genre_norm, sizeof(tr->genre_norm), tr->genre);
 }
 
 static void index_phrase_token(const char* norm_text, int track_id) {
@@ -553,46 +714,56 @@ static void index_phrase_token(const char* norm_text, int track_id) {
 static void index_track_tokens_verbose(int id) {
     if (id < 0 || id >= track_count) return;
     IndexedTrack* tr = &tracks[id];
+    TrackNormScratch norms;
+    fill_track_norms(tr, &norms);
 
     TokenAddCtx ctx = {.id = id, .is_track = true};
     int tok_before = token_count;
 
-    index_logf("tokenize [%d] title_norm=%.32s", id,
-                 tr->title_norm[0] ? tr->title_norm : "(empty)");
-    Metadata_foreachNormalizedToken(tr->title_norm, add_token_cb, &ctx);
+    index_logf("DBG tokenize [%d] title_norm=%.32s", id,
+                 norms.title_norm[0] ? norms.title_norm : "(empty)");
+    Metadata_foreachNormalizedToken(norms.title_norm, add_token_cb, &ctx);
     index_log_stats("after title tokens", id);
 
-    Metadata_foreachNormalizedToken(tr->artist_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(norms.artist_norm, add_token_cb, &ctx);
     index_log_stats("after artist tokens", id);
 
-    Metadata_foreachNormalizedToken(tr->album_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(norms.album_norm, add_token_cb, &ctx);
     index_log_stats("after album tokens", id);
 
-    Metadata_foreachNormalizedToken(tr->genre_norm, add_token_cb, &ctx);
-    Metadata_foreachNormalizedToken(tr->filename_norm, add_token_cb, &ctx);
-    index_phrase_token(tr->title_norm, id);
+    Metadata_foreachNormalizedToken(norms.genre_norm, add_token_cb, &ctx);
+    index_log_stats("after genre tokens", id);
 
-    index_logf("tokenize [%d] done +%d tokens", id, token_count - tok_before);
+    Metadata_foreachNormalizedToken(norms.filename_norm, add_token_cb, &ctx);
+    index_log_stats("after filename tokens", id);
+
+    index_phrase_token(norms.title_norm, id);
+    index_log_stats("after phrase token", id);
+
+    index_logf("DBG tokenize [%d] done +%d tokens", id, token_count - tok_before);
 }
 
 static void index_track_tokens(int id) {
     if (id < 0 || id >= track_count) return;
+    if (skip_token_index) return;
     if (index_verbose_step(id)) {
         index_track_tokens_verbose(id);
         return;
     }
 
     IndexedTrack* tr = &tracks[id];
+    TrackNormScratch norms;
+    fill_track_norms(tr, &norms);
 
     TokenAddCtx ctx = {.id = id, .is_track = true};
 
-    Metadata_foreachNormalizedToken(tr->title_norm, add_token_cb, &ctx);
-    Metadata_foreachNormalizedToken(tr->artist_norm, add_token_cb, &ctx);
-    Metadata_foreachNormalizedToken(tr->album_norm, add_token_cb, &ctx);
-    Metadata_foreachNormalizedToken(tr->genre_norm, add_token_cb, &ctx);
-    Metadata_foreachNormalizedToken(tr->filename_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(norms.title_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(norms.artist_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(norms.album_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(norms.genre_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(norms.filename_norm, add_token_cb, &ctx);
 
-    index_phrase_token(tr->title_norm, id);
+    index_phrase_token(norms.title_norm, id);
 }
 
 static void index_playlist_tokens(int id);
@@ -623,16 +794,16 @@ static void copy_track_fields(IndexedTrack* dst, const IndexedTrack* src) {
 
 static void copy_track_from_bin(const IndexBinTrack* src, IndexedTrack* dst) {
     if (!src || !dst) return;
+    memset(dst, 0, sizeof(*dst));
     strncpy(dst->path, src->path, sizeof(dst->path) - 1);
     strncpy(dst->title, src->title, sizeof(dst->title) - 1);
     strncpy(dst->artist, src->artist, sizeof(dst->artist) - 1);
     strncpy(dst->album, src->album, sizeof(dst->album) - 1);
     strncpy(dst->genre, src->genre, sizeof(dst->genre) - 1);
-    strncpy(dst->filename_norm, src->filename_norm, sizeof(dst->filename_norm) - 1);
     dst->format = (AudioFormat)src->format;
     dst->file_mtime = src->mtime;
     dst->file_size = src->size;
-    index_track_norms(dst);
+    (void)src->filename_norm;
 }
 
 static void copy_playlist_from_bin(const IndexBinPlaylist* src, IndexedPlaylist* dst) {
@@ -651,10 +822,16 @@ static uint64_t parse_fingerprint_string(const char* s) {
     int version = 0;
     unsigned long long value = 0;
     if (sscanf(s, "v%d_%llx", &version, &value) == 2 &&
-        version == LIBRARY_INDEX_FORMAT_VERSION) {
+        (version == LIBRARY_INDEX_FORMAT_VERSION ||
+         version == LIBRARY_INDEX_FORMAT_VERSION_LEGACY)) {
         return (uint64_t)value;
     }
     return 0;
+}
+
+static bool bin_version_supported(uint32_t version) {
+    return version == LIBRARY_INDEX_FORMAT_VERSION ||
+           version == LIBRARY_INDEX_FORMAT_VERSION_LEGACY;
 }
 
 static const TrackCacheEntry* track_cache_find(TrackCacheEntry* cache, int count, const char* path) {
@@ -694,11 +871,9 @@ static bool track_cache_apply(const TrackCacheEntry* cached, IndexedTrack* tr) {
         strncpy(tr->artist, cached->artist, sizeof(tr->artist) - 1);
         strncpy(tr->album, cached->album, sizeof(tr->album) - 1);
         strncpy(tr->genre, cached->genre, sizeof(tr->genre) - 1);
-        strncpy(tr->filename_norm, cached->filename_norm, sizeof(tr->filename_norm) - 1);
         tr->format = cached->format;
         tr->file_mtime = cached->file_mtime;
         tr->file_size = cached->file_size;
-        index_track_norms(tr);
         return true;
     }
 
@@ -748,12 +923,9 @@ static void load_indexed_track_from_json(JSON_Object* to, IndexedTrack* tr) {
     if (album) strncpy(tr->album, album, sizeof(tr->album) - 1);
     const char* genre = json_object_get_string(to, "genre");
     if (genre) strncpy(tr->genre, genre, sizeof(tr->genre) - 1);
-    const char* fn = json_object_get_string(to, "filename_norm");
-    if (fn) strncpy(tr->filename_norm, fn, sizeof(tr->filename_norm) - 1);
     tr->format = (AudioFormat)json_object_get_number(to, "format");
     tr->file_mtime = (uint64_t)json_object_get_number(to, "mtime");
     tr->file_size = (uint64_t)json_object_get_number(to, "size");
-    index_track_norms(tr);
 }
 
 static TrackCacheEntry* load_track_cache_from_bin(int* out_count) {
@@ -765,7 +937,7 @@ static TrackCacheEntry* load_track_cache_from_bin(int* out_count) {
     IndexBinHeader hdr;
     if (fread(&hdr, sizeof(hdr), 1, f) != 1 ||
         hdr.magic != INDEX_BIN_MAGIC ||
-        hdr.version != LIBRARY_INDEX_FORMAT_VERSION) {
+        !bin_version_supported(hdr.version)) {
         fclose(f);
         return NULL;
     }
@@ -886,6 +1058,89 @@ static bool bin_file_size_valid(FILE* f, const IndexBinHeader* hdr) {
     return fsize >= expected;
 }
 
+static bool load_tokens_from_file(FILE* f) {
+    uint32_t tok_count = 0;
+    if (fread(&tok_count, sizeof(tok_count), 1, f) != 1) return false;
+    if (tok_count > LIBRARY_MAX_TOKENS) return false;
+
+    token_hash_clear();
+    token_count = 0;
+    token_cap = 0;
+    free(tokens);
+    tokens = NULL;
+
+    if (tok_count == 0) return true;
+
+    tokens = calloc(tok_count, sizeof(IndexToken));
+    if (!tokens) return false;
+    token_cap = (int)tok_count;
+    token_count = (int)tok_count;
+
+    for (uint32_t i = 0; i < tok_count; i++) {
+        if (fread(tokens[i].token, sizeof(tokens[i].token), 1, f) != 1) return false;
+
+        uint32_t tn = 0;
+        if (fread(&tn, sizeof(tn), 1, f) != 1) return false;
+        if (tn > LIBRARY_MAX_TRACKS) return false;
+        if (tn > 0) {
+            tokens[i].track_ids = calloc(tn, sizeof(uint16_t));
+            if (!tokens[i].track_ids) return false;
+            if (fread(tokens[i].track_ids, sizeof(uint16_t), (size_t)tn, f) != (size_t)tn) {
+                return false;
+            }
+            tokens[i].track_count = (int)tn;
+            tokens[i].track_cap = (int)tn;
+        }
+
+        uint32_t pn = 0;
+        if (fread(&pn, sizeof(pn), 1, f) != 1) return false;
+        if (pn > LIBRARY_MAX_PLAYLISTS_INDEX) return false;
+        if (pn > 0) {
+            tokens[i].playlist_ids = calloc(pn, sizeof(uint16_t));
+            if (!tokens[i].playlist_ids) return false;
+            if (fread(tokens[i].playlist_ids, sizeof(uint16_t), (size_t)pn, f) != (size_t)pn) {
+                return false;
+            }
+            tokens[i].playlist_count = (int)pn;
+            tokens[i].playlist_cap = (int)pn;
+        }
+
+        if (!token_node_link((int)i)) return false;
+    }
+    index_logf("INFO load_tokens: %u tokens", tok_count);
+    return true;
+}
+
+static bool save_tokens_to_file(FILE* f) {
+    if (skip_token_index || token_index_degraded) {
+        uint32_t zero = 0;
+        return fwrite(&zero, sizeof(zero), 1, f) == 1;
+    }
+
+    uint32_t tok_count = (uint32_t)token_count;
+    if (fwrite(&tok_count, sizeof(tok_count), 1, f) != 1) return false;
+
+    for (int i = 0; i < token_count; i++) {
+        IndexToken* t = &tokens[i];
+        if (fwrite(t->token, sizeof(t->token), 1, f) != 1) return false;
+
+        uint32_t tn = (uint32_t)t->track_count;
+        if (fwrite(&tn, sizeof(tn), 1, f) != 1) return false;
+        if (tn > 0 &&
+            fwrite(t->track_ids, sizeof(uint16_t), (size_t)tn, f) != (size_t)tn) {
+            return false;
+        }
+
+        uint32_t pn = (uint32_t)t->playlist_count;
+        if (fwrite(&pn, sizeof(pn), 1, f) != 1) return false;
+        if (pn > 0 &&
+            fwrite(t->playlist_ids, sizeof(uint16_t), (size_t)pn, f) != (size_t)pn) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool load_bin_index(uint64_t expected_fp) {
     FILE* f = fopen(INDEX_BIN_PATH, "rb");
     if (!f) return false;
@@ -893,7 +1148,7 @@ static bool load_bin_index(uint64_t expected_fp) {
     IndexBinHeader hdr;
     if (fread(&hdr, sizeof(hdr), 1, f) != 1 ||
         hdr.magic != INDEX_BIN_MAGIC ||
-        hdr.version != LIBRARY_INDEX_FORMAT_VERSION ||
+        !bin_version_supported(hdr.version) ||
         hdr.fingerprint != expected_fp ||
         hdr.track_count > LIBRARY_MAX_TRACKS ||
         hdr.playlist_count > LIBRARY_MAX_PLAYLISTS_INDEX ||
@@ -905,7 +1160,11 @@ static bool load_bin_index(uint64_t expected_fp) {
     }
 
     free_index_data();
-    index_log("load_bin_index: loading tracks from cache");
+    skip_token_index = false;
+    token_index_degraded = false;
+    index_log("INFO load_bin_index: loading tracks from cache");
+
+    bool tokens_on_disk = (hdr.version == LIBRARY_INDEX_FORMAT_VERSION);
 
     if (hdr.track_count > 0) {
         tracks = calloc(hdr.track_count, sizeof(IndexedTrack));
@@ -920,12 +1179,14 @@ static bool load_bin_index(uint64_t expected_fp) {
                 free_index_data();
                 fclose(f);
                 discard_bin_index();
-                index_log("load_bin_index: truncated track record");
+                index_log("ERR load_bin_index: truncated track record");
                 return false;
             }
             copy_track_from_bin(&bt, &tracks[track_count]);
             track_count++;
-            index_track_tokens(track_count - 1);
+            if (!tokens_on_disk) {
+                index_track_tokens(track_count - 1);
+            }
         }
     }
 
@@ -943,18 +1204,29 @@ static bool load_bin_index(uint64_t expected_fp) {
                 free_index_data();
                 fclose(f);
                 discard_bin_index();
-                index_log("load_bin_index: truncated playlist record");
+                index_log("ERR load_bin_index: truncated playlist record");
                 return false;
             }
             copy_playlist_from_bin(&bp, &playlists[playlist_count++]);
         }
     }
 
-    fclose(f);
-    index_log("load_bin_index: indexing playlist tokens");
-    for (int i = 0; i < playlist_count; i++) {
-        index_playlist_tokens(i);
+    if (tokens_on_disk) {
+        if (!load_tokens_from_file(f)) {
+            free_index_data();
+            fclose(f);
+            discard_bin_index();
+            index_log("ERR load_bin_index: token section invalid");
+            return false;
+        }
+    } else {
+        index_log("INFO load_bin_index: indexing playlist tokens");
+        for (int i = 0; i < playlist_count; i++) {
+            index_playlist_tokens(i);
+        }
     }
+
+    fclose(f);
     saved_fingerprint = expected_fp;
     return true;
 }
@@ -986,7 +1258,11 @@ static int save_bin_index(uint64_t fp) {
         strncpy(bt.artist, tracks[i].artist, sizeof(bt.artist) - 1);
         strncpy(bt.album, tracks[i].album, sizeof(bt.album) - 1);
         strncpy(bt.genre, tracks[i].genre, sizeof(bt.genre) - 1);
-        strncpy(bt.filename_norm, tracks[i].filename_norm, sizeof(bt.filename_norm) - 1);
+        {
+            TrackNormScratch norms;
+            fill_track_norms(&tracks[i], &norms);
+            strncpy(bt.filename_norm, norms.filename_norm, sizeof(bt.filename_norm) - 1);
+        }
         bt.format = (uint32_t)tracks[i].format;
         bt.mtime = tracks[i].file_mtime;
         bt.size = tracks[i].file_size;
@@ -1011,6 +1287,12 @@ static int save_bin_index(uint64_t fp) {
             unlink(INDEX_BIN_TMP_PATH);
             return -1;
         }
+    }
+
+    if (!save_tokens_to_file(f)) {
+        fclose(f);
+        unlink(INDEX_BIN_TMP_PATH);
+        return -1;
     }
 
     fflush(f);
@@ -1106,9 +1388,14 @@ static void index_playlist_tokens(int id) {
     }
 }
 
-static void rebuild_index(uint64_t fp) {
-    index_log("rebuild_index: start");
+static bool rebuild_index(uint64_t fp) {
+    index_log("INFO rebuild_index: start");
     free_index_data();
+    skip_token_index = false;
+    token_index_degraded = false;
+    last_ok_idx = -1;
+    last_ok_path[0] = '\0';
+    bool hard_failure = false;
 
     int cache_count = 0;
     TrackCacheEntry* cache = load_track_cache(&cache_count);
@@ -1130,6 +1417,11 @@ static void rebuild_index(uint64_t fp) {
         }
         if (count > 0 && paths) {
             int tracks_cap = count < 256 ? count : 256;
+            size_t track_bytes = (size_t)tracks_cap * sizeof(IndexedTrack);
+            if (!index_memory_ok(track_bytes)) {
+                index_log("ERR rebuild_index: tracks budget exceeded");
+                hard_failure = true;
+            } else {
             tracks = calloc((size_t)tracks_cap, sizeof(IndexedTrack));
             if (tracks) {
                 char status[128];
@@ -1142,13 +1434,14 @@ static void rebuild_index(uint64_t fp) {
                     bool verbose = index_verbose_step(track_count);
 
                     if ((i & 511) == 0) {
-                        snprintf(status, sizeof(status), "Reading tags... %d/%d", i, count);
+                        snprintf(status, sizeof(status), "Indexing %d/%d", i, count);
                         set_status(status);
                         char logbuf[128];
                         snprintf(logbuf, sizeof(logbuf),
                                  "rebuild_index: tags %d/%d hits=%d reads=%d skips=%d",
                                  i, count, cache_hits, tag_reads, stat_skips);
                         index_log(logbuf);
+                        index_log_mem_milestone(i, count);
                     }
 
                     if (verbose) {
@@ -1176,9 +1469,16 @@ static void rebuild_index(uint64_t fp) {
                         int new_cap = tracks_cap * 2;
                         if (new_cap > count) new_cap = count;
                         if (new_cap <= tracks_cap) break;
+                        size_t grow_bytes = (size_t)(new_cap - tracks_cap) * sizeof(IndexedTrack);
+                        if (!index_memory_ok(grow_bytes)) {
+                            index_logf("ERR rebuild_index: tracks OOM at i=%d", i);
+                            hard_failure = true;
+                            break;
+                        }
                         IndexedTrack* grown = realloc(tracks, (size_t)new_cap * sizeof(IndexedTrack));
                         if (!grown) {
-                            index_log("rebuild_index: tracks realloc failed");
+                            index_log("ERR rebuild_index: tracks realloc failed");
+                            hard_failure = true;
                             break;
                         }
                         memset(grown + tracks_cap, 0,
@@ -1226,11 +1526,14 @@ static void rebuild_index(uint64_t fp) {
 
                         const char* base = strrchr(paths[i], '/');
                         base = base ? base + 1 : paths[i];
-                        Metadata_copyNormalized(tr->filename_norm, sizeof(tr->filename_norm), base);
-                        index_track_norms(tr);
+                        (void)base;
 
                         tr->file_mtime = (uint64_t)st.st_mtime;
                         tr->file_size = (uint64_t)st.st_size;
+
+                        if (!meta.title[0] || strcmp(meta.title, base) == 0) {
+                            index_logf("WARN tag_empty idx=%d", track_count);
+                        }
                     }
 
                     if (verbose) {
@@ -1239,6 +1542,16 @@ static void rebuild_index(uint64_t fp) {
 
                     track_count++;
                     index_track_tokens(track_count - 1);
+
+                    strncpy(last_ok_path, paths[i], sizeof(last_ok_path) - 1);
+                    last_ok_idx = track_count - 1;
+                    {
+                        char prog[128];
+                        const char* slash = strrchr(last_ok_path, '/');
+                        snprintf(prog, sizeof(prog), "Indexing %d/%d (%s)",
+                                 i + 1, count, slash ? slash + 1 : last_ok_path);
+                        set_status(prog);
+                    }
 
                     if (verbose) {
                         index_log_stats("after tokenize", track_count - 1);
@@ -1254,7 +1567,9 @@ static void rebuild_index(uint64_t fp) {
                     index_log(logbuf);
                 }
             } else {
-                index_log("rebuild_index: tracks alloc failed");
+                index_log("ERR rebuild_index: tracks alloc failed");
+                hard_failure = true;
+            }
             }
             Playlist_freePaths(paths, count);
         }
@@ -1263,14 +1578,12 @@ static void rebuild_index(uint64_t fp) {
 
     {
         char logbuf[96];
-        snprintf(logbuf, sizeof(logbuf), "rebuild_index: track tokens done count=%d", token_count);
+        snprintf(logbuf, sizeof(logbuf), "INFO rebuild_index: track tokens done count=%d", token_count);
         index_log(logbuf);
     }
-    set_index_ready(true);
-    index_log("rebuild_index: search enabled");
 
     char partial[128];
-    snprintf(partial, sizeof(partial), "Ready tracks (%d), scanning playlists...", track_count);
+    snprintf(partial, sizeof(partial), "Tracks (%d), scanning playlists...", track_count);
     set_status(partial);
 
     set_status("Scanning playlists...");
@@ -1334,58 +1647,137 @@ static void rebuild_index(uint64_t fp) {
     }
 
     set_status("Saving index...");
-    index_log("rebuild_index: save begin");
+    index_log("INFO rebuild_index: save begin");
     saved_fingerprint = fp;
     int save_rc = save_bin_index(fp);
     char done[128];
-    snprintf(done, sizeof(done), "rebuild_index: save rc=%d", save_rc);
+    snprintf(done, sizeof(done), "INFO rebuild_index: save rc=%d", save_rc);
     index_log(done);
-    snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
+
+    if (save_rc != 0 || hard_failure) {
+        snprintf(last_failure_reason, sizeof(last_failure_reason),
+                 save_rc != 0 ? "Index save failed" : "Index build incomplete");
+        set_build_state(INDEX_STATE_IDLE);
+        index_log("ERR rebuild_index: failed");
+        return false;
+    }
+
+    if (token_index_degraded) {
+        snprintf(done, sizeof(done), "Ready (%d tracks, lite search)", track_count);
+    } else {
+        snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
+    }
     set_status(done);
-    snprintf(done, sizeof(done), "rebuild_index: done (%d tracks, %d playlists)", track_count, playlist_count);
+    snprintf(done, sizeof(done), "INFO rebuild_index: done (%d tracks, %d playlists)",
+             track_count, playlist_count);
     index_log(done);
+    return true;
 }
 
-static void* build_thread_func(void* arg) {
-    bool force_rebuild = ((intptr_t)arg) != 0;
-    PWR_pinToCores(CPU_CORE_PERFORMANCE);
-
-    index_log(force_rebuild ? "build_thread: force rebuild" : "build_thread: start");
-
+static bool build_once(bool force_rebuild) {
     M3U_init();
 
     LibraryFingerprint fp;
     compute_fingerprint(&fp);
 
     char fp_msg[96];
-    snprintf(fp_msg, sizeof(fp_msg), "build_thread: fingerprint %016llx", (unsigned long long)fp.hash);
+    snprintf(fp_msg, sizeof(fp_msg), "INFO build_thread: fingerprint %016llx",
+             (unsigned long long)fp.hash);
     index_log(fp_msg);
 
     if (force_rebuild) {
-        rebuild_index(fp.hash);
-    } else {
-        set_status("Loading index...");
-        if (load_bin_index(fp.hash)) {
-            char done[128];
-            snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
-            set_status(done);
-            index_log("build_thread: loaded binary index");
-        } else if (load_json_index(fp.hash)) {
-            char done[128];
-            snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
-            set_status(done);
-            index_log("build_thread: migrated JSON index");
-        } else {
-            rebuild_index(fp.hash);
+        return rebuild_index(fp.hash);
+    }
+
+    set_status("Loading index...");
+    if (load_bin_index(fp.hash)) {
+        char done[128];
+        snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
+        set_status(done);
+        index_log("INFO build_thread: loaded binary index");
+        return true;
+    }
+    if (load_json_index(fp.hash)) {
+        char done[128];
+        snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
+        set_status(done);
+        index_log("INFO build_thread: migrated JSON index");
+        return true;
+    }
+    return rebuild_index(fp.hash);
+}
+
+static void* supervisor_thread_func(void* arg) {
+    bool force_rebuild = ((intptr_t)arg) != 0;
+    PWR_pinToCores(CPU_CORE_PERFORMANCE);
+
+    index_log(force_rebuild ? "INFO supervisor: force rebuild" : "INFO supervisor: start");
+
+    if (!force_rebuild) {
+        int persisted_failures = 0;
+        read_failure_count_file(&persisted_failures);
+        if (persisted_failures >= INDEX_BUILD_MAX_FAILURES) {
+            snprintf(last_failure_reason, sizeof(last_failure_reason),
+                     "Index failed %d times", persisted_failures);
+            set_build_state(INDEX_STATE_FAILED);
+            snprintf(build_status, sizeof(build_status), "Search index unavailable");
+            build_running = false;
+            index_log("ERR supervisor: persisted failure limit reached");
+            return NULL;
         }
+        build_failure_count = persisted_failures;
+    } else {
+        build_failure_count = 0;
+        clear_failure_count_file();
+    }
+
+    bool success = false;
+    for (int attempt = 1; attempt <= INDEX_BUILD_MAX_FAILURES; attempt++) {
+        index_logf("INFO supervisor: attempt %d/%d", attempt, INDEX_BUILD_MAX_FAILURES);
+        set_build_state(INDEX_STATE_BUILDING);
+        snprintf(build_status, sizeof(build_status), "Building index (%d/%d)...",
+                 attempt, INDEX_BUILD_MAX_FAILURES);
+
+        if (build_once(force_rebuild)) {
+            success = true;
+            build_failure_count = 0;
+            clear_failure_count_file();
+            set_build_state(INDEX_STATE_READY);
+            break;
+        }
+
+        build_failure_count = attempt;
+        write_failure_count_file(attempt);
+        snprintf(last_failure_reason, sizeof(last_failure_reason),
+                 "Build failed (attempt %d)", attempt);
+
+        if (attempt < INDEX_BUILD_MAX_FAILURES) {
+            int delay_sec = attempt == 1 ? 2 : 5;
+            index_logf("WARN supervisor: retry in %ds", delay_sec);
+            sleep((unsigned int)delay_sec);
+        }
+        force_rebuild = true;
     }
 
     pthread_mutex_lock(&index_mutex);
-    index_ready = true;
     build_running = false;
+    if (success) {
+        index_ready = true;
+        build_state = INDEX_STATE_READY;
+    } else {
+        index_ready = false;
+        build_state = INDEX_STATE_FAILED;
+        snprintf(build_status, sizeof(build_status), "Search index failed (3 attempts)");
+        index_log("ERR supervisor: giving up after 3 failures");
+    }
     pthread_mutex_unlock(&index_mutex);
-    index_log("build_thread: complete");
+
+    index_log(success ? "INFO supervisor: complete" : "ERR supervisor: failed");
     return NULL;
+}
+
+static void* build_thread_func(void* arg) {
+    return supervisor_thread_func(arg);
 }
 
 static bool start_build_thread(bool force_rebuild) {
@@ -1432,6 +1824,9 @@ void LibraryIndex_init(void) {
 bool LibraryIndex_requestRebuild(void) {
     build_log_clear();
     if (Settings_getIndexLog()) unlink(INDEX_LOG_PATH);
+    build_failure_count = 0;
+    clear_failure_count_file();
+    set_build_state(INDEX_STATE_BUILDING);
     set_status("Rebuilding index...");
     return start_build_thread(true);
 }
@@ -1440,11 +1835,13 @@ void LibraryIndex_quit(void) {
     free_index_data();
     index_ready = false;
     build_started = false;
+    build_state = INDEX_STATE_IDLE;
+    build_running = false;
 }
 
 bool LibraryIndex_isReady(void) {
     pthread_mutex_lock(&index_mutex);
-    bool ready = index_ready;
+    bool ready = index_ready && build_state == INDEX_STATE_READY;
     pthread_mutex_unlock(&index_mutex);
     return ready;
 }
@@ -1454,6 +1851,42 @@ bool LibraryIndex_isBuilding(void) {
     bool running = build_running;
     pthread_mutex_unlock(&index_mutex);
     return running;
+}
+
+bool LibraryIndex_isFailed(void) {
+    pthread_mutex_lock(&index_mutex);
+    bool failed = build_state == INDEX_STATE_FAILED;
+    pthread_mutex_unlock(&index_mutex);
+    return failed;
+}
+
+bool LibraryIndex_canSearch(void) {
+    pthread_mutex_lock(&index_mutex);
+    bool ok = index_ready && build_state == INDEX_STATE_READY && track_count > 0;
+    pthread_mutex_unlock(&index_mutex);
+    return ok;
+}
+
+bool LibraryIndex_isDegraded(void) {
+    return token_index_degraded;
+}
+
+IndexBuildState LibraryIndex_getBuildState(void) {
+    pthread_mutex_lock(&index_mutex);
+    IndexBuildState state = build_state;
+    pthread_mutex_unlock(&index_mutex);
+    return state;
+}
+
+int LibraryIndex_getBuildFailureCount(void) {
+    pthread_mutex_lock(&index_mutex);
+    int count = build_failure_count;
+    pthread_mutex_unlock(&index_mutex);
+    return count;
+}
+
+const char* LibraryIndex_getLastSearchError(void) {
+    return last_search_error[0] ? last_search_error : NULL;
 }
 
 const char* LibraryIndex_getBuildStatus(void) {
@@ -1488,7 +1921,7 @@ static void add_postings_for_token(int token_idx,
 
     IndexToken* tok = &tokens[token_idx];
     for (int i = 0; i < tok->track_count; i++) {
-        int id = tok->track_ids[i];
+        int id = (int)tok->track_ids[i];
         if (id < 0 || id >= track_count) continue;
         if (track_hits) track_hits[id]++;
         if (track_matched_token && !track_matched_token[id]) {
@@ -1496,7 +1929,7 @@ static void add_postings_for_token(int token_idx,
         }
     }
     for (int i = 0; i < tok->playlist_count; i++) {
-        int id = tok->playlist_ids[i];
+        int id = (int)tok->playlist_ids[i];
         if (id < 0 || id >= playlist_count) continue;
         if (playlist_hits) playlist_hits[id]++;
         if (playlist_matched_token && !playlist_matched_token[id]) {
@@ -1551,9 +1984,33 @@ static void union_token_hits(const int* hits, int hit_count, int required,
     }
 }
 
+static void gather_track_candidates_fuse_scan(const char query_tokens[][48], int query_token_count,
+                                              bool fuzzy, bool* track_candidate) {
+    if (!track_candidate || query_token_count <= 0 || track_count <= 0) return;
+
+    char query_phrase[512];
+    query_phrase[0] = '\0';
+    for (int q = 0; q < query_token_count; q++) {
+        if (q > 0) strncat(query_phrase, " ", sizeof(query_phrase) - strlen(query_phrase) - 1);
+        strncat(query_phrase, query_tokens[q], sizeof(query_phrase) - strlen(query_phrase) - 1);
+    }
+
+    for (int i = 0; i < track_count; i++) {
+        int sc = score_track_fuse(i, query_phrase, query_tokens, query_token_count, fuzzy);
+        if (sc >= SEARCH_FUSE_MIN_SCORE) {
+            track_candidate[i] = true;
+        }
+    }
+}
+
 static void gather_track_candidates(const char query_tokens[][48], int query_token_count,
                                     bool fuzzy, bool* track_candidate) {
     if (!track_candidate || query_token_count <= 0) return;
+
+    if (token_index_degraded || skip_token_index || token_count == 0) {
+        gather_track_candidates_fuse_scan(query_tokens, query_token_count, fuzzy, track_candidate);
+        return;
+    }
 
     int* hits = calloc((size_t)track_count, sizeof(int));
     bool* matched = calloc((size_t)track_count, sizeof(bool));
@@ -1644,12 +2101,14 @@ static int score_track_fuse(int id, const char* query_norm,
                             bool fuzzy) {
     if (id < 0 || id >= track_count) return 0;
     IndexedTrack* tr = &tracks[id];
+    TrackNormScratch norms;
+    fill_track_norms(tr, &norms);
     SearchFuseFields fields = {
-        .title = tr->title_norm,
-        .artist = tr->artist_norm,
-        .album = tr->album_norm,
-        .genre = tr->genre_norm,
-        .filename = tr->filename_norm
+        .title = norms.title_norm,
+        .artist = norms.artist_norm,
+        .album = norms.album_norm,
+        .genre = norms.genre_norm,
+        .filename = norms.filename_norm
     };
     return SearchFuse_scoreFields(&fields, query_norm, query_tokens, query_token_count, fuzzy);
 }
@@ -1687,11 +2146,16 @@ static int compare_scored(const void* a, const void* b) {
 }
 
 static void fill_track_row(SearchResultRow* row, int id, int score) {
+    if (!row || id < 0 || id >= track_count) return;
     IndexedTrack* tr = &tracks[id];
     row->type = SEARCH_ITEM_TRACK;
     row->score = score;
     strncpy(row->path, tr->path, sizeof(row->path) - 1);
-    strncpy(row->label, tr->title[0] ? tr->title : tr->filename_norm, sizeof(row->label) - 1);
+    if (tr->title[0]) {
+        strncpy(row->label, tr->title, sizeof(row->label) - 1);
+    } else {
+        track_path_basename(tr, row->label, sizeof(row->label));
+    }
 
     if (tr->artist[0] && tr->album[0]) {
         snprintf(row->subtitle, sizeof(row->subtitle), "%s — %s", tr->artist, tr->album);
@@ -1737,13 +2201,35 @@ static void collect_query_token(const char* token, void* userdata) {
 }
 
 bool LibraryIndex_search(const char* query, SearchResults* out) {
-    if (!out || !query) return false;
+    last_search_error[0] = '\0';
+    if (!out) {
+        strncpy(last_search_error, "Invalid results", sizeof(last_search_error) - 1);
+        return false;
+    }
     memset(out, 0, sizeof(*out));
 
-    if (!LibraryIndex_isReady()) return false;
+    if (!query || !query[0]) {
+        strncpy(last_search_error, "Empty query", sizeof(last_search_error) - 1);
+        return false;
+    }
+
+    if (LibraryIndex_isFailed()) {
+        strncpy(last_search_error, "Index unavailable", sizeof(last_search_error) - 1);
+        return false;
+    }
+
+    if (!LibraryIndex_canSearch()) {
+        if (LibraryIndex_isBuilding()) {
+            strncpy(last_search_error, "Index building", sizeof(last_search_error) - 1);
+        } else {
+            strncpy(last_search_error, "Index not ready", sizeof(last_search_error) - 1);
+        }
+        return false;
+    }
 
     pthread_mutex_lock(&index_mutex);
     if (track_count == 0 && playlist_count == 0) {
+        strncpy(last_search_error, "Empty index", sizeof(last_search_error) - 1);
         pthread_mutex_unlock(&index_mutex);
         return false;
     }
@@ -1754,6 +2240,7 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     Metadata_foreachToken(query, collect_query_token, &qctx);
     int query_token_count = qctx.count;
     if (query_token_count == 0) {
+        strncpy(last_search_error, "No search terms", sizeof(last_search_error) - 1);
         pthread_mutex_unlock(&index_mutex);
         return false;
     }
@@ -1767,6 +2254,8 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     if (!track_candidate || !playlist_candidate) {
         free(track_candidate);
         free(playlist_candidate);
+        strncpy(last_search_error, "Search OOM", sizeof(last_search_error) - 1);
+        index_log("ERR search OOM: candidate bitmaps");
         pthread_mutex_unlock(&index_mutex);
         return false;
     }
@@ -1784,6 +2273,8 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
         free(playlist_candidate);
         free(nested_items);
         free(mixed_items);
+        strncpy(last_search_error, "Search OOM", sizeof(last_search_error) - 1);
+        index_log("ERR search OOM: score arrays");
         pthread_mutex_unlock(&index_mutex);
         return false;
     }

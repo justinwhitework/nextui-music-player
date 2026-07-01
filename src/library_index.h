@@ -14,6 +14,13 @@ typedef enum {
     SEARCH_ITEM_USER_PLAYLIST
 } SearchResultType;
 
+typedef enum {
+    INDEX_STATE_IDLE = 0,
+    INDEX_STATE_BUILDING,
+    INDEX_STATE_READY,
+    INDEX_STATE_FAILED
+} IndexBuildState;
+
 typedef struct {
     SearchResultType type;
     char label[256];
@@ -37,7 +44,13 @@ void LibraryIndex_quit(void);
 
 bool LibraryIndex_isReady(void);
 bool LibraryIndex_isBuilding(void);
+bool LibraryIndex_isFailed(void);
+bool LibraryIndex_canSearch(void);
+bool LibraryIndex_isDegraded(void);
+IndexBuildState LibraryIndex_getBuildState(void);
+int LibraryIndex_getBuildFailureCount(void);
 const char* LibraryIndex_getBuildStatus(void);
+const char* LibraryIndex_getLastSearchError(void);
 
 int LibraryIndex_getBuildLogCount(void);
 const char* LibraryIndex_getBuildLogLine(int index);
