@@ -31,6 +31,7 @@
 #define LIBRARY_MAX_PLAYLISTS_INDEX 10000
 #define LIBRARY_MAX_TOKENS 65536
 #define TOKEN_GROW 16
+#define TOKEN_INIT_CAP 256
 #define TOKEN_HASH_BUCKETS 8192
 #define FUZZY_MIN_TOKEN_LEN 4
 #define FUZZY_RESULT_THRESHOLD 3
@@ -361,9 +362,12 @@ static void token_hash_insert(int token_idx) {
     if (token_idx < 0 || token_idx >= token_count) return;
 
     if (token_hash_node_count >= token_hash_node_cap) {
-        int nc = token_hash_node_cap ? token_hash_node_cap * 2 : 4096;
+        int nc = token_hash_node_cap ? token_hash_node_cap * 2 : TOKEN_INIT_CAP;
         TokenHashNode* nn = realloc(token_hash_nodes, sizeof(TokenHashNode) * nc);
-        if (!nn) return;
+        if (!nn) {
+            index_log("token_index: hash node realloc failed");
+            return;
+        }
         token_hash_nodes = nn;
         token_hash_node_cap = nc;
     }
@@ -398,9 +402,12 @@ static int ensure_token(const char* token) {
     if (token_count >= LIBRARY_MAX_TOKENS) return -1;
 
     if (token_count >= token_cap) {
-        int nc = token_cap ? token_cap * 2 : 4096;
+        int nc = token_cap ? token_cap * 2 : TOKEN_INIT_CAP;
         IndexToken* nt = realloc(tokens, sizeof(IndexToken) * nc);
-        if (!nt) return -1;
+        if (!nt) {
+            index_log("token_index: token table realloc failed");
+            return -1;
+        }
         memset(nt + token_cap, 0, sizeof(IndexToken) * (nc - token_cap));
         tokens = nt;
         token_cap = nc;
@@ -482,20 +489,14 @@ static void index_phrase_token(const char* norm_text, int track_id) {
 static void index_track_tokens(int id) {
     if (id < 0 || id >= track_count) return;
     IndexedTrack* tr = &tracks[id];
-    index_track_norms(tr);
 
     TokenAddCtx ctx = {.id = id, .is_track = true};
-
-    Metadata_foreachToken(tr->title, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->artist, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->album, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->genre, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->filename_norm, add_token_cb, &ctx);
 
     Metadata_foreachNormalizedToken(tr->title_norm, add_token_cb, &ctx);
     Metadata_foreachNormalizedToken(tr->artist_norm, add_token_cb, &ctx);
     Metadata_foreachNormalizedToken(tr->album_norm, add_token_cb, &ctx);
     Metadata_foreachNormalizedToken(tr->genre_norm, add_token_cb, &ctx);
+    Metadata_foreachNormalizedToken(tr->filename_norm, add_token_cb, &ctx);
 
     index_phrase_token(tr->title_norm, id);
     index_phrase_token(tr->artist_norm, id);
@@ -520,38 +521,6 @@ static void clear_token_index(void) {
     token_count = 0;
     token_cap = 0;
     token_hash_clear();
-}
-
-static void rebuild_token_index(const char* phase) {
-    char logbuf[128];
-    snprintf(logbuf, sizeof(logbuf), "token_index[%s]: start tracks=%d playlists=%d",
-             phase ? phase : "?", track_count, playlist_count);
-    index_log(logbuf);
-
-    clear_token_index();
-    char status[128];
-    for (int i = 0; i < track_count; i++) {
-        if ((i & 1023) == 0) {
-            snprintf(status, sizeof(status), "Building index... tracks %d/%d", i, track_count);
-            set_status(status);
-            snprintf(logbuf, sizeof(logbuf), "token_index[%s]: tracks %d/%d tokens=%d",
-                     phase ? phase : "?", i, track_count, token_count);
-            index_log(logbuf);
-        }
-        index_track_tokens(i);
-    }
-    for (int i = 0; i < playlist_count; i++) {
-        if ((i & 255) == 0 && playlist_count > 0) {
-            snprintf(logbuf, sizeof(logbuf), "token_index[%s]: playlists %d/%d",
-                     phase ? phase : "?", i, playlist_count);
-            index_log(logbuf);
-        }
-        index_playlist_tokens(i);
-    }
-
-    snprintf(logbuf, sizeof(logbuf), "token_index[%s]: done tokens=%d",
-             phase ? phase : "?", token_count);
-    index_log(logbuf);
 }
 
 typedef struct {
@@ -880,7 +849,9 @@ static bool load_bin_index(uint64_t expected_fp) {
                 index_log("load_bin_index: truncated track record");
                 return false;
             }
-            copy_track_from_bin(&bt, &tracks[track_count++]);
+            copy_track_from_bin(&bt, &tracks[track_count]);
+            index_track_tokens(track_count);
+            track_count++;
         }
     }
 
@@ -906,8 +877,10 @@ static bool load_bin_index(uint64_t expected_fp) {
     }
 
     fclose(f);
-    index_log("load_bin_index: rebuilding token index");
-    rebuild_token_index("load");
+    index_log("load_bin_index: indexing playlist tokens");
+    for (int i = 0; i < playlist_count; i++) {
+        index_playlist_tokens(i);
+    }
     saved_fingerprint = expected_fp;
     return true;
 }
@@ -1003,6 +976,7 @@ static bool load_json_index(uint64_t expected_fp) {
             JSON_Object* to = json_array_get_object(track_arr, i);
             if (!to) continue;
             load_indexed_track_from_json(to, &tracks[track_count]);
+            index_track_tokens(track_count);
             track_count++;
         }
     }
@@ -1035,7 +1009,9 @@ static bool load_json_index(uint64_t expected_fp) {
         }
     }
 
-    rebuild_token_index("json");
+    for (int i = 0; i < playlist_count; i++) {
+        index_playlist_tokens(i);
+    }
     saved_fingerprint = expected_fp;
     json_value_free(root);
 
@@ -1152,7 +1128,22 @@ static void rebuild_index(uint64_t fp) {
                         tr->file_size = (uint64_t)st.st_size;
                     }
 
+                    index_track_tokens(track_count);
                     track_count++;
+
+                    if (track_count == 1) {
+                        char logbuf[160];
+                        snprintf(logbuf, sizeof(logbuf),
+                                 "rebuild_index: first track tokens ok tokens=%d",
+                                 token_count);
+                        index_log(logbuf);
+                    } else if ((track_count & 511) == 0) {
+                        char logbuf[128];
+                        snprintf(logbuf, sizeof(logbuf),
+                                 "rebuild_index: token progress %d/%d tokens=%d",
+                                 track_count, count, token_count);
+                        index_log(logbuf);
+                    }
                 }
                 snprintf(status, sizeof(status), "Reading tags... %d/%d", count, count);
                 set_status(status);
@@ -1171,11 +1162,13 @@ static void rebuild_index(uint64_t fp) {
     }
     free(cache);
 
-    set_status("Building track index...");
-    index_log("rebuild_index: partial token index begin");
-    rebuild_token_index("partial");
+    {
+        char logbuf[96];
+        snprintf(logbuf, sizeof(logbuf), "rebuild_index: track tokens done count=%d", token_count);
+        index_log(logbuf);
+    }
     set_index_ready(true);
-    index_log("rebuild_index: partial token index done, search enabled");
+    index_log("rebuild_index: search enabled");
 
     char partial[128];
     snprintf(partial, sizeof(partial), "Ready tracks (%d), scanning playlists...", track_count);
@@ -1226,9 +1219,15 @@ static void rebuild_index(uint64_t fp) {
         }
     }
 
-    set_status("Building index...");
-    index_log("rebuild_index: final token index begin");
-    rebuild_token_index("final");
+    index_log("rebuild_index: playlist tokens begin");
+    for (int i = 0; i < playlist_count; i++) {
+        index_playlist_tokens(i);
+    }
+    {
+        char logbuf[96];
+        snprintf(logbuf, sizeof(logbuf), "rebuild_index: playlist tokens done token_count=%d", token_count);
+        index_log(logbuf);
+    }
 
     set_status("Saving index...");
     index_log("rebuild_index: save begin");
