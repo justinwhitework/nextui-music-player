@@ -811,7 +811,11 @@ void render_index_build_screen(SDL_Surface* screen, int show_setting,
             SDL_FreeSurface(text);
         }
         GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-        GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "LOG", NULL}, 1, screen, 1);
+        if (LibraryIndex_isFailed()) {
+            GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "RETRY", "Y", "LOG", NULL}, 1, screen, 1);
+        } else {
+            GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "LOG", NULL}, 1, screen, 1);
+        }
         return;
     }
 
@@ -848,7 +852,12 @@ void render_index_build_screen(SDL_Surface* screen, int show_setting,
 
     render_scroll_indicators(screen, log_scroll, lines_per_page, total);
     GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "STATUS", "UP/DOWN", "SCROLL", NULL}, 1, screen, 1);
+    if (LibraryIndex_isFailed()) {
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "RETRY", "Y", "STATUS", "UP/DOWN", "SCROLL", NULL},
+                            1, screen, 1);
+    } else {
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "STATUS", "UP/DOWN", "SCROLL", NULL}, 1, screen, 1);
+    }
 }
 
 

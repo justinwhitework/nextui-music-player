@@ -200,7 +200,7 @@ static int build_log_slot(int index) {
     return (build_log_start + index) % BUILD_LOG_MAX_LINES;
 }
 
-#define INDEX_VERBOSE_TRACKS 32
+#define INDEX_VERBOSE_TRACKS 64
 #define INDEX_VERBOSE_EVERY 512
 #define INDEX_MEM_LOG_EVERY 256
 
@@ -1047,16 +1047,51 @@ static void discard_bin_index(void) {
     unlink(INDEX_BIN_TMP_PATH);
 }
 
+static bool bin_validate_token_section(FILE* f, long offset, long fsize) {
+    if (fseek(f, offset, SEEK_SET) != 0) return false;
+
+    uint32_t tok_count = 0;
+    if (fread(&tok_count, sizeof(tok_count), 1, f) != 1) return false;
+    if (tok_count > LIBRARY_MAX_TOKENS) return false;
+
+    long pos = offset + (long)sizeof(uint32_t);
+    for (uint32_t i = 0; i < tok_count; i++) {
+        pos += 48;
+        if (pos + (long)sizeof(uint32_t) > fsize) return false;
+
+        if (fseek(f, pos, SEEK_SET) != 0) return false;
+        uint32_t tn = 0;
+        if (fread(&tn, sizeof(tn), 1, f) != 1) return false;
+        if (tn > LIBRARY_MAX_TRACKS) return false;
+        pos += (long)sizeof(uint32_t) + (long)tn * (long)sizeof(uint16_t);
+
+        if (pos + (long)sizeof(uint32_t) > fsize) return false;
+        if (fseek(f, pos, SEEK_SET) != 0) return false;
+        uint32_t pn = 0;
+        if (fread(&pn, sizeof(pn), 1, f) != 1) return false;
+        if (pn > LIBRARY_MAX_PLAYLISTS_INDEX) return false;
+        pos += (long)sizeof(uint32_t) + (long)pn * (long)sizeof(uint16_t);
+    }
+
+    return fsize >= pos;
+}
+
 static bool bin_file_size_valid(FILE* f, const IndexBinHeader* hdr) {
     if (fseek(f, 0, SEEK_END) != 0) return false;
     long fsize = ftell(f);
     if (fsize < 0) return false;
-    if (fseek(f, (long)sizeof(*hdr), SEEK_SET) != 0) return false;
 
-    long expected = (long)sizeof(*hdr)
+    long base = (long)sizeof(*hdr)
         + (long)hdr->track_count * (long)sizeof(IndexBinTrack)
         + (long)hdr->playlist_count * (long)sizeof(IndexBinPlaylist);
-    return fsize >= expected;
+    if (fsize < base) return false;
+
+    if (hdr->version == LIBRARY_INDEX_FORMAT_VERSION) {
+        if (!bin_validate_token_section(f, base, fsize)) return false;
+    }
+
+    if (fseek(f, (long)sizeof(*hdr), SEEK_SET) != 0) return false;
+    return true;
 }
 
 static bool load_tokens_from_file(FILE* f) {
@@ -1647,6 +1682,14 @@ static bool rebuild_index(uint64_t fp) {
         index_log(logbuf);
     }
 
+    if (hard_failure) {
+        snprintf(last_failure_reason, sizeof(last_failure_reason), "Index build incomplete");
+        set_status("Index build incomplete");
+        set_build_state(INDEX_STATE_IDLE);
+        index_log("ERR rebuild_index: incomplete build, skipping save");
+        return false;
+    }
+
     set_status("Saving index...");
     index_log("INFO rebuild_index: save begin");
     saved_fingerprint = fp;
@@ -1655,9 +1698,8 @@ static bool rebuild_index(uint64_t fp) {
     snprintf(done, sizeof(done), "INFO rebuild_index: save rc=%d", save_rc);
     index_log(done);
 
-    if (save_rc != 0 || hard_failure) {
-        snprintf(last_failure_reason, sizeof(last_failure_reason),
-                 save_rc != 0 ? "Index save failed" : "Index build incomplete");
+    if (save_rc != 0) {
+        snprintf(last_failure_reason, sizeof(last_failure_reason), "Index save failed");
         set_build_state(INDEX_STATE_IDLE);
         index_log("ERR rebuild_index: failed");
         return false;
@@ -1722,7 +1764,9 @@ static void* supervisor_thread_func(void* arg) {
                      "Index failed %d times", persisted_failures);
             set_build_state(INDEX_STATE_FAILED);
             snprintf(build_status, sizeof(build_status), "Search index unavailable");
+            pthread_mutex_lock(&index_mutex);
             build_running = false;
+            pthread_mutex_unlock(&index_mutex);
             index_log("ERR supervisor: persisted failure limit reached");
             return NULL;
         }

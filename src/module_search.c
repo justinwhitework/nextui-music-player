@@ -335,6 +335,15 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
         if (state == SEARCH_STATE_BUILDING || state == SEARCH_STATE_FAILED) {
             dirty = 1;
             if (handle_index_build_input(screen, true)) dirty = 1;
+            if (state == SEARCH_STATE_FAILED && PAD_justPressed(BTN_A)) {
+                if (LibraryIndex_requestRebuild()) {
+                    state = SEARCH_STATE_REBUILDING;
+                    show_index_log = false;
+                    dirty = 1;
+                } else {
+                    show_toast("Index rebuild already running");
+                }
+            }
             if (LibraryIndex_isFailed()) {
                 state = SEARCH_STATE_FAILED;
             } else if (LibraryIndex_isReady()) {
