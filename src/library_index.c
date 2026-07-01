@@ -32,6 +32,7 @@
 #define PLAYLISTS_TMP INDEX_DIR "/playlists.index.tsv.tmp"
 #define META_TMP INDEX_DIR "/index.meta.tmp"
 #define LEGACY_JSON SHARED_USERDATA_PATH "/music-player/library_index.json"
+#define INDEX_META_VERSION 2
 
 #define TSV_LINE_MAX 1408
 #define ABORT_CHECK_EVERY 256
@@ -100,13 +101,21 @@ static void update_fp(LibraryFingerprint* fp, const char* path) {
     }
 }
 
+static bool skip_fp_dirent(const char* name) {
+    if (!name) return true;
+    if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
+        return true;
+    }
+    return false;
+}
+
 static void scan_fp_dir(const char* dir, LibraryFingerprint* fp, bool playlists_only) {
     DIR* d = opendir(dir);
     if (!d) return;
 
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+        if (skip_fp_dirent(ent->d_name)) continue;
 
         char full[768];
         snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
@@ -205,7 +214,7 @@ static bool parse_meta_file(const char* path, IndexMeta* meta) {
     if (meta->playlist_count < 0) meta->playlist_count = 0;
     if (meta->song_count > INDEX_MAX_ROWS) meta->song_count = INDEX_MAX_ROWS;
     if (meta->playlist_count > INDEX_MAX_ROWS) meta->playlist_count = INDEX_MAX_ROWS;
-    return meta->version == 1 && meta->fingerprint[0];
+    return meta->version == INDEX_META_VERSION && meta->fingerprint[0];
 }
 
 static bool index_cache_valid(const char* expected_fp) {
@@ -228,7 +237,7 @@ static bool write_meta_tmp(const char* fp_str, int song_count, int playlist_coun
     if (playlist_count < 0) playlist_count = 0;
     if (song_count > INDEX_MAX_ROWS) song_count = INDEX_MAX_ROWS;
     if (playlist_count > INDEX_MAX_ROWS) playlist_count = INDEX_MAX_ROWS;
-    fprintf(f, "version=1\n");
+    fprintf(f, "version=%d\n", INDEX_META_VERSION);
     fprintf(f, "fingerprint=%s\n", fp_str);
     fprintf(f, "song_count=%d\n", song_count);
     fprintf(f, "playlist_count=%d\n", playlist_count);
@@ -416,7 +425,8 @@ static bool rebuild_index(const char* fp_str) {
     set_status("Scanning music...");
     {
         char** paths = NULL;
-        int collected = Playlist_collectPaths(MUSIC_PATH, &paths, INDEX_MAX_ROWS + 1);
+        // include_hidden: index dot folders like Music/.library (hidden from file browser only)
+        int collected = Playlist_collectPathsEx(MUSIC_PATH, &paths, INDEX_MAX_ROWS + 1, true);
         int write_count = collected;
         if (collected > INDEX_MAX_ROWS) {
             songs_truncated = 1;
@@ -488,7 +498,7 @@ static bool rebuild_index(const char* fp_str) {
 
         PlaylistInfo* infos = calloc(limit, sizeof(PlaylistInfo));
         if (infos) {
-            int n = M3U_listAllPlaylists(infos, limit, Settings_getPlaylistScanDepth());
+            int n = M3U_listAllPlaylistsEx(infos, limit, Settings_getPlaylistScanDepth(), true);
             if (n < 0) n = 0;
             if (n > INDEX_MAX_ROWS) {
                 playlists_truncated = 1;
