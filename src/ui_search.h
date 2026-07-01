@@ -9,6 +9,8 @@ void render_search_building(SDL_Surface* screen, int show_setting, const char* s
 
 void render_search_query(SDL_Surface* screen, int show_setting, const char* query);
 
+void render_search_searching(SDL_Surface* screen, int show_setting, const char* query);
+
 void render_search_results(SDL_Surface* screen, int show_setting,
                            const char* query,
                            const SearchResults* results,

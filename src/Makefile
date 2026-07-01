@@ -103,7 +103,7 @@ MBEDTLS_OBJS = $(patsubst %.c,$(MBEDTLS_OBJ_DIR)/%.o,$(MBEDTLS_SRC))
 # Main application sources
 
 APP_SRC = \
-    musicplayer.c player.c playlist.c playlist_m3u.c metadata_reader.c library_index.c \
+    musicplayer.c player.c playlist.c playlist_m3u.c metadata_reader.c library_index.c search_fuse.c \
     radio.c radio_net.c album_art.c lyrics.c radio_hls.c radio_curated.c \
     downloader.c selfupdate.c display_helper.c \
     podcast.c podcast_rss.c podcast_search.c \

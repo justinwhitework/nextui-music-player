@@ -6,6 +6,7 @@
 #include "player.h"
 #include "settings.h"
 #include "browser.h"
+#include "search_fuse.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,67 +17,45 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <stdint.h>
+#include <time.h>
+#include <errno.h>
 
 #include "defines.h"
 #include "api.h"
-#include "include/parson/parson.h"
 
 #define MUSIC_PATH SDCARD_PATH "/Music"
-#define INDEX_PATH SHARED_USERDATA_PATH "/music-player/library_index.json"
-#define LIBRARY_MAX_TRACKS 32768
-#define LIBRARY_MAX_TOKENS 65536
-#define TOKEN_GROW 16
+#define INDEX_DIR SHARED_USERDATA_PATH "/music-player/index"
+#define INDEX_META INDEX_DIR "/index.meta"
+#define SONGS_TSV INDEX_DIR "/songs.index.tsv"
+#define PLAYLISTS_TSV INDEX_DIR "/playlists.index.tsv"
+#define SONGS_TMP INDEX_DIR "/songs.index.tsv.tmp"
+#define PLAYLISTS_TMP INDEX_DIR "/playlists.index.tsv.tmp"
+#define META_TMP INDEX_DIR "/index.meta.tmp"
+#define LEGACY_JSON SHARED_USERDATA_PATH "/music-player/library_index.json"
 
-typedef struct {
-    char path[512];
-    char title[256];
-    char artist[256];
-    char album[256];
-    char genre[256];
-    char filename_norm[256];
-    AudioFormat format;
-} IndexedTrack;
-
-typedef struct {
-    char path[512];
-    char name[128];
-    char name_norm[128];
-    char parent_folder[64];
-    char parent_norm[64];
-    int track_count;
-    bool is_root;
-} IndexedPlaylist;
-
-typedef struct {
-    char token[48];
-    int* track_ids;
-    int track_count;
-    int track_cap;
-    int* playlist_ids;
-    int playlist_count;
-    int playlist_cap;
-} IndexToken;
+#define TSV_LINE_MAX 1024
+#define ABORT_CHECK_EVERY 256
 
 typedef struct {
     uint64_t file_count;
     uint64_t latest_mtime;
 } LibraryFingerprint;
 
+typedef struct {
+    char (*tokens)[SEARCH_FUSE_TOKEN_MAX];
+    int count;
+} QueryCollectCtx;
+
 static pthread_mutex_t index_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool build_started = false;
 static bool build_running = false;
 static bool index_ready = false;
 static char build_status[128] = "Starting...";
+static int cached_song_count = 0;
+static int cached_playlist_count = 0;
 
-static IndexedTrack* tracks = NULL;
-static int track_count = 0;
-static IndexedPlaylist* playlists = NULL;
-static int playlist_count = 0;
-static IndexToken* tokens = NULL;
-static int token_count = 0;
-static int token_cap = 0;
-
-static char saved_fingerprint[64] = "";
+static volatile bool search_abort = false;
+static volatile bool search_timed_out = false;
 
 static void set_status(const char* msg) {
     pthread_mutex_lock(&index_mutex);
@@ -137,393 +116,375 @@ static void compute_fingerprint(LibraryFingerprint* fp) {
     scan_fp_dir(PLAYLISTS_DIR, fp, true);
 }
 
-static void free_index_data(void) {
-    for (int i = 0; i < token_count; i++) {
-        free(tokens[i].track_ids);
-        free(tokens[i].playlist_ids);
-    }
-    free(tokens);
-    tokens = NULL;
-    token_count = 0;
-    token_cap = 0;
-
-    free(tracks);
-    tracks = NULL;
-    track_count = 0;
-
-    free(playlists);
-    playlists = NULL;
-    playlist_count = 0;
+static bool ensure_index_dir(void) {
+    mkdir(SHARED_USERDATA_PATH "/music-player", 0755);
+    return mkdir(INDEX_DIR, 0755) == 0 || errno == EEXIST;
 }
 
-static int find_token(const char* token) {
-    for (int i = 0; i < token_count; i++) {
-        if (strcmp(tokens[i].token, token) == 0) return i;
+static void sanitize_tsv_field(const char* src, char* dst, size_t dst_size) {
+    if (!dst || dst_size == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
     }
-    return -1;
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 1 < dst_size; i++) {
+        char c = src[i];
+        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+        dst[j++] = c;
+    }
+    dst[j] = '\0';
 }
 
-static int ensure_token(const char* token) {
-    if (!token || !token[0]) return -1;
-
-    int idx = find_token(token);
-    if (idx >= 0) return idx;
-
-    if (token_count >= LIBRARY_MAX_TOKENS) return -1;
-
-    if (token_count >= token_cap) {
-        int nc = token_cap ? token_cap * 2 : 4096;
-        IndexToken* nt = realloc(tokens, sizeof(IndexToken) * nc);
-        if (!nt) return -1;
-        memset(nt + token_cap, 0, sizeof(IndexToken) * (nc - token_cap));
-        tokens = nt;
-        token_cap = nc;
-    }
-
-    idx = token_count++;
-    memset(&tokens[idx], 0, sizeof(tokens[idx]));
-    strncpy(tokens[idx].token, token, sizeof(tokens[idx].token) - 1);
-    return idx;
+static void unlink_tmp_files(void) {
+    unlink(SONGS_TMP);
+    unlink(PLAYLISTS_TMP);
+    unlink(META_TMP);
 }
 
-static void token_add_track(int token_idx, int track_id) {
-    if (token_idx < 0 || track_id < 0) return;
-    IndexToken* t = &tokens[token_idx];
-
-    for (int i = 0; i < t->track_count; i++) {
-        if (t->track_ids[i] == track_id) return;
-    }
-
-    if (t->track_count >= t->track_cap) {
-        int nc = t->track_cap ? t->track_cap * 2 : TOKEN_GROW;
-        int* nd = realloc(t->track_ids, sizeof(int) * nc);
-        if (!nd) return;
-        t->track_ids = nd;
-        t->track_cap = nc;
-    }
-    t->track_ids[t->track_count++] = track_id;
+static void delete_index_files(void) {
+    unlink(SONGS_TSV);
+    unlink(PLAYLISTS_TSV);
+    unlink(INDEX_META);
+    unlink(LEGACY_JSON);
+    unlink_tmp_files();
 }
 
-static void token_add_playlist(int token_idx, int playlist_id) {
-    if (token_idx < 0 || playlist_id < 0) return;
-    IndexToken* t = &tokens[token_idx];
-
-    for (int i = 0; i < t->playlist_count; i++) {
-        if (t->playlist_ids[i] == playlist_id) return;
-    }
-
-    if (t->playlist_count >= t->playlist_cap) {
-        int nc = t->playlist_cap ? t->playlist_cap * 2 : TOKEN_GROW;
-        int* nd = realloc(t->playlist_ids, sizeof(int) * nc);
-        if (!nd) return;
-        t->playlist_ids = nd;
-        t->playlist_cap = nc;
-    }
-    t->playlist_ids[t->playlist_count++] = playlist_id;
+static bool file_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
 typedef struct {
-    int id;
-    bool is_track;
-} TokenAddCtx;
+    int version;
+    char fingerprint[64];
+    int song_count;
+    int playlist_count;
+    int songs_truncated;
+    int playlists_truncated;
+} IndexMeta;
 
-static void add_token_cb(const char* token, void* userdata) {
-    TokenAddCtx* ctx = (TokenAddCtx*)userdata;
-    int ti = ensure_token(token);
-    if (ti < 0) return;
-    if (ctx->is_track) token_add_track(ti, ctx->id);
-    else token_add_playlist(ti, ctx->id);
-}
+static bool parse_meta_file(const char* path, IndexMeta* meta) {
+    memset(meta, 0, sizeof(*meta));
+    FILE* f = fopen(path, "r");
+    if (!f) return false;
 
-static void index_track_tokens(int id) {
-    if (id < 0 || id >= track_count) return;
-    IndexedTrack* tr = &tracks[id];
-    TokenAddCtx ctx = {.id = id, .is_track = true};
-
-    Metadata_foreachToken(tr->title, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->artist, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->album, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->genre, add_token_cb, &ctx);
-    Metadata_foreachToken(tr->filename_norm, add_token_cb, &ctx);
-}
-
-static void index_playlist_tokens(int id) {
-    if (id < 0 || id >= playlist_count) return;
-    IndexedPlaylist* pl = &playlists[id];
-    TokenAddCtx ctx = {.id = id, .is_track = false};
-
-    Metadata_foreachToken(pl->name_norm, add_token_cb, &ctx);
-    if (!pl->is_root) {
-        Metadata_foreachToken(pl->parent_norm, add_token_cb, &ctx);
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "version=%d", &meta->version) == 1) continue;
+        if (sscanf(line, "fingerprint=%63s", meta->fingerprint) == 1) continue;
+        if (sscanf(line, "song_count=%d", &meta->song_count) == 1) continue;
+        if (sscanf(line, "playlist_count=%d", &meta->playlist_count) == 1) continue;
+        if (sscanf(line, "songs_truncated=%d", &meta->songs_truncated) == 1) continue;
+        if (sscanf(line, "playlists_truncated=%d", &meta->playlists_truncated) == 1) continue;
     }
+    fclose(f);
+    return meta->version == 1 && meta->fingerprint[0];
 }
 
-static bool load_json_index(const char* expected_fp) {
-    JSON_Value* root = json_parse_file(INDEX_PATH);
-    if (!root) return false;
-
-    JSON_Object* obj = json_value_get_object(root);
-    const char* fp = json_object_get_string(obj, "fingerprint");
-    if (!fp || strcmp(fp, expected_fp) != 0) {
-        json_value_free(root);
+static bool index_cache_valid(const char* expected_fp) {
+    if (!file_exists(INDEX_META) || !file_exists(SONGS_TSV) || !file_exists(PLAYLISTS_TSV)) {
         return false;
     }
-
-    free_index_data();
-
-    JSON_Array* track_arr = json_object_get_array(obj, "tracks");
-    if (track_arr) {
-        size_t n = json_array_get_count(track_arr);
-        if (n > (size_t)LIBRARY_MAX_TRACKS) n = LIBRARY_MAX_TRACKS;
-        tracks = calloc(n, sizeof(IndexedTrack));
-        if (!tracks) {
-            json_value_free(root);
-            return false;
-        }
-        for (size_t i = 0; i < n; i++) {
-            JSON_Object* to = json_array_get_object(track_arr, i);
-            if (!to) continue;
-            const char* path = json_object_get_string(to, "path");
-            if (path) strncpy(tracks[track_count].path, path, sizeof(tracks[track_count].path) - 1);
-            const char* title = json_object_get_string(to, "title");
-            if (title) strncpy(tracks[track_count].title, title, sizeof(tracks[track_count].title) - 1);
-            const char* artist = json_object_get_string(to, "artist");
-            if (artist) strncpy(tracks[track_count].artist, artist, sizeof(tracks[track_count].artist) - 1);
-            const char* album = json_object_get_string(to, "album");
-            if (album) strncpy(tracks[track_count].album, album, sizeof(tracks[track_count].album) - 1);
-            const char* genre = json_object_get_string(to, "genre");
-            if (genre) strncpy(tracks[track_count].genre, genre, sizeof(tracks[track_count].genre) - 1);
-            const char* fn = json_object_get_string(to, "filename_norm");
-            if (fn) strncpy(tracks[track_count].filename_norm, fn, sizeof(tracks[track_count].filename_norm) - 1);
-            tracks[track_count].format = (AudioFormat)json_object_get_number(to, "format");
-            track_count++;
-        }
-    }
-
-    JSON_Array* pl_arr = json_object_get_array(obj, "playlists");
-    if (pl_arr) {
-        size_t n = json_array_get_count(pl_arr);
-        playlists = calloc(n, sizeof(IndexedPlaylist));
-        if (!playlists) {
-            free_index_data();
-            json_value_free(root);
-            return false;
-        }
-        for (size_t i = 0; i < n; i++) {
-            JSON_Object* po = json_array_get_object(pl_arr, i);
-            if (!po) continue;
-            const char* path = json_object_get_string(po, "path");
-            if (path) strncpy(playlists[playlist_count].path, path, sizeof(playlists[playlist_count].path) - 1);
-            const char* name = json_object_get_string(po, "name");
-            if (name) strncpy(playlists[playlist_count].name, name, sizeof(playlists[playlist_count].name) - 1);
-            const char* nn = json_object_get_string(po, "name_norm");
-            if (nn) strncpy(playlists[playlist_count].name_norm, nn, sizeof(playlists[playlist_count].name_norm) - 1);
-            const char* pf = json_object_get_string(po, "parent_folder");
-            if (pf) strncpy(playlists[playlist_count].parent_folder, pf, sizeof(playlists[playlist_count].parent_folder) - 1);
-            const char* pn = json_object_get_string(po, "parent_norm");
-            if (pn) strncpy(playlists[playlist_count].parent_norm, pn, sizeof(playlists[playlist_count].parent_norm) - 1);
-            playlists[playlist_count].track_count = (int)json_object_get_number(po, "track_count");
-            playlists[playlist_count].is_root = json_object_get_boolean(po, "is_root");
-            playlist_count++;
-        }
-    }
-
-    JSON_Object* tok_obj = json_object_get_object(obj, "tokens");
-    if (tok_obj) {
-        size_t key_count = json_object_get_count(tok_obj);
-        tokens = calloc(key_count ? key_count : 1, sizeof(IndexToken));
-        if (!tokens) {
-            free_index_data();
-            json_value_free(root);
-            return false;
-        }
-        for (size_t i = 0; i < key_count; i++) {
-            const char* key = json_object_get_name(tok_obj, i);
-            JSON_Object* to = json_object_get_object(tok_obj, key);
-            if (!key || !to) continue;
-
-            strncpy(tokens[token_count].token, key, sizeof(tokens[token_count].token) - 1);
-
-            JSON_Array* ta = json_object_get_array(to, "tracks");
-            if (ta) {
-                size_t tn = json_array_get_count(ta);
-                tokens[token_count].track_ids = calloc(tn ? tn : 1, sizeof(int));
-                if (tokens[token_count].track_ids) {
-                    tokens[token_count].track_cap = (int)tn;
-                    for (size_t j = 0; j < tn; j++) {
-                        tokens[token_count].track_ids[tokens[token_count].track_count++] =
-                            (int)json_array_get_number(ta, j);
-                    }
-                }
-            }
-
-            JSON_Array* pa = json_object_get_array(to, "playlists");
-            if (pa) {
-                size_t pn = json_array_get_count(pa);
-                tokens[token_count].playlist_ids = calloc(pn ? pn : 1, sizeof(int));
-                if (tokens[token_count].playlist_ids) {
-                    tokens[token_count].playlist_cap = (int)pn;
-                    for (size_t j = 0; j < pn; j++) {
-                        tokens[token_count].playlist_ids[tokens[token_count].playlist_count++] =
-                            (int)json_array_get_number(pa, j);
-                    }
-                }
-            }
-            token_count++;
-        }
-    }
-
-    strncpy(saved_fingerprint, expected_fp, sizeof(saved_fingerprint) - 1);
-    json_value_free(root);
+    IndexMeta meta;
+    if (!parse_meta_file(INDEX_META, &meta)) return false;
+    if (strcmp(meta.fingerprint, expected_fp) != 0) return false;
+    cached_song_count = meta.song_count;
+    cached_playlist_count = meta.playlist_count;
     return true;
 }
 
-static int save_json_index(const char* fp_str) {
-    mkdir(SHARED_USERDATA_PATH "/music-player", 0755);
-
-    JSON_Value* root = json_value_init_object();
-    if (!root) return -1;
-    JSON_Object* obj = json_value_get_object(root);
-
-    json_object_set_string(obj, "fingerprint", fp_str);
-
-    JSON_Value* track_arr_val = json_value_init_array();
-    JSON_Array* track_arr = json_value_get_array(track_arr_val);
-    for (int i = 0; i < track_count; i++) {
-        JSON_Value* tv = json_value_init_object();
-        JSON_Object* to = json_value_get_object(tv);
-        json_object_set_string(to, "path", tracks[i].path);
-        json_object_set_string(to, "title", tracks[i].title);
-        json_object_set_string(to, "artist", tracks[i].artist);
-        json_object_set_string(to, "album", tracks[i].album);
-        json_object_set_string(to, "genre", tracks[i].genre);
-        json_object_set_string(to, "filename_norm", tracks[i].filename_norm);
-        json_object_set_number(to, "format", tracks[i].format);
-        json_array_append_value(track_arr, tv);
-    }
-    json_object_set_value(obj, "tracks", track_arr_val);
-
-    JSON_Value* pl_arr_val = json_value_init_array();
-    JSON_Array* pl_arr = json_value_get_array(pl_arr_val);
-    for (int i = 0; i < playlist_count; i++) {
-        JSON_Value* pv = json_value_init_object();
-        JSON_Object* po = json_value_get_object(pv);
-        json_object_set_string(po, "path", playlists[i].path);
-        json_object_set_string(po, "name", playlists[i].name);
-        json_object_set_string(po, "name_norm", playlists[i].name_norm);
-        json_object_set_string(po, "parent_folder", playlists[i].parent_folder);
-        json_object_set_string(po, "parent_norm", playlists[i].parent_norm);
-        json_object_set_number(po, "track_count", playlists[i].track_count);
-        json_object_set_boolean(po, "is_root", playlists[i].is_root);
-        json_array_append_value(pl_arr, pv);
-    }
-    json_object_set_value(obj, "playlists", pl_arr_val);
-
-    JSON_Value* tok_val = json_value_init_object();
-    JSON_Object* tok_obj = json_value_get_object(tok_val);
-    for (int i = 0; i < token_count; i++) {
-        JSON_Value* entry_val = json_value_init_object();
-        JSON_Object* entry = json_value_get_object(entry_val);
-
-        JSON_Value* ta_val = json_value_init_array();
-        JSON_Array* ta = json_value_get_array(ta_val);
-        for (int j = 0; j < tokens[i].track_count; j++) {
-            json_array_append_number(ta, tokens[i].track_ids[j]);
-        }
-        json_object_set_value(entry, "tracks", ta_val);
-
-        JSON_Value* pa_val = json_value_init_array();
-        JSON_Array* pa = json_value_get_array(pa_val);
-        for (int j = 0; j < tokens[i].playlist_count; j++) {
-            json_array_append_number(pa, tokens[i].playlist_ids[j]);
-        }
-        json_object_set_value(entry, "playlists", pa_val);
-
-        json_object_set_value(tok_obj, tokens[i].token, entry_val);
-    }
-    json_object_set_value(obj, "tokens", tok_val);
-
-    int rc = json_serialize_to_file_pretty(root, INDEX_PATH);
-    json_value_free(root);
-    return rc == JSONSuccess ? 0 : -1;
+static bool write_meta_tmp(const char* fp_str, int song_count, int playlist_count,
+                           int songs_truncated, int playlists_truncated) {
+    FILE* f = fopen(META_TMP, "w");
+    if (!f) return false;
+    fprintf(f, "version=1\n");
+    fprintf(f, "fingerprint=%s\n", fp_str);
+    fprintf(f, "song_count=%d\n", song_count);
+    fprintf(f, "playlist_count=%d\n", playlist_count);
+    fprintf(f, "songs_truncated=%d\n", songs_truncated);
+    fprintf(f, "playlists_truncated=%d\n", playlists_truncated);
+    fprintf(f, "built_at=%ld\n", (long)time(NULL));
+    fclose(f);
+    return true;
 }
 
-static void rebuild_index(const char* fp_str) {
-    free_index_data();
+static bool commit_index_files(void) {
+    if (rename(SONGS_TMP, SONGS_TSV) != 0) return false;
+    if (rename(PLAYLISTS_TMP, PLAYLISTS_TSV) != 0) {
+        unlink(SONGS_TSV);
+        return false;
+    }
+    if (rename(META_TMP, INDEX_META) != 0) {
+        unlink(SONGS_TSV);
+        unlink(PLAYLISTS_TSV);
+        return false;
+    }
+    unlink(LEGACY_JSON);
+    return true;
+}
+
+static int parse_tsv_fields(char* line, char** fields, int max_fields) {
+    int count = 0;
+    char* p = line;
+    while (count < max_fields) {
+        fields[count++] = p;
+        char* tab = strchr(p, '\t');
+        if (!tab) break;
+        *tab = '\0';
+        p = tab + 1;
+    }
+    if (count > 0) {
+        char* nl = strchr(fields[count - 1], '\n');
+        if (nl) *nl = '\0';
+        nl = strchr(fields[count - 1], '\r');
+        if (nl) *nl = '\0';
+    }
+    return count;
+}
+
+static void collect_query_token(const char* token, void* userdata) {
+    QueryCollectCtx* ctx = (QueryCollectCtx*)userdata;
+    if (ctx->count >= 32) return;
+    strncpy(ctx->tokens[ctx->count], token, SEARCH_FUSE_TOKEN_MAX - 1);
+    ctx->tokens[ctx->count][SEARCH_FUSE_TOKEN_MAX - 1] = '\0';
+    ctx->count++;
+}
+
+static int compare_row_score(const void* a, const void* b) {
+    const SearchResultRow* ra = (const SearchResultRow*)a;
+    const SearchResultRow* rb = (const SearchResultRow*)b;
+    if (rb->score != ra->score) return rb->score - ra->score;
+    return strcmp(ra->path, rb->path);
+}
+
+static void topk_insert(SearchResultRow* heap, int* count, int max_count, const SearchResultRow* item) {
+    if (item->score < SEARCH_FUSE_MIN_SCORE) return;
+
+    if (*count < max_count) {
+        heap[(*count)++] = *item;
+        return;
+    }
+
+    int min_i = 0;
+    for (int i = 1; i < *count; i++) {
+        if (heap[i].score < heap[min_i].score) min_i = i;
+    }
+    if (item->score > heap[min_i].score) {
+        heap[min_i] = *item;
+    }
+}
+
+static bool search_should_abort(int row_index) {
+    if ((row_index & (ABORT_CHECK_EVERY - 1)) != 0) return false;
+    if (search_abort) {
+        search_timed_out = true;
+        return true;
+    }
+    return false;
+}
+
+static int score_playlist_row(const char* path, const char* title,
+                              const char query_norm[256],
+                              const char query_tokens[][SEARCH_FUSE_TOKEN_MAX],
+                              int query_token_count) {
+    char name_norm[128];
+    char parent_norm[64];
+    char file_norm[128];
+
+    Metadata_copyNormalized(name_norm, sizeof(name_norm), title);
+
+    char parent_folder[64];
+    M3U_getPlaylistParentFolder(path, parent_folder, sizeof(parent_folder));
+    Metadata_copyNormalized(parent_norm, sizeof(parent_norm), parent_folder);
+
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    Metadata_copyNormalized(file_norm, sizeof(file_norm), base);
+
+    int score = SearchFuse_scorePlaylist(name_norm, parent_norm, query_norm,
+                                         query_tokens, query_token_count, true);
+    int path_score = SearchFuse_matchScore(file_norm, query_norm, true);
+    if (path_score > score) score = path_score;
+
+    for (int t = 0; t < query_token_count; t++) {
+        int ts = SearchFuse_matchScore(file_norm, query_tokens[t], true);
+        if (ts > score) score = ts;
+    }
+    return score;
+}
+
+static void fill_song_result(SearchResultRow* row, const char* path,
+                             const char* title, const char* album, const char* artist,
+                             int score) {
+    memset(row, 0, sizeof(*row));
+    row->type = SEARCH_ITEM_TRACK;
+    row->score = score;
+    strncpy(row->path, path, sizeof(row->path) - 1);
+
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    strncpy(row->label, title[0] ? title : base, sizeof(row->label) - 1);
+
+    if (artist[0] && album[0]) {
+        snprintf(row->subtitle, sizeof(row->subtitle), "%s — %s", artist, album);
+    } else if (artist[0]) {
+        snprintf(row->subtitle, sizeof(row->subtitle), "%s", artist);
+    } else if (album[0]) {
+        snprintf(row->subtitle, sizeof(row->subtitle), "%s", album);
+    }
+
+    row->track_count = 1;
+    row->format = Player_detectFormat(path);
+}
+
+static void fill_playlist_result(SearchResultRow* row, const char* path, const char* title,
+                                 int track_count, bool is_root, int score) {
+    memset(row, 0, sizeof(*row));
+    row->type = is_root ? SEARCH_ITEM_USER_PLAYLIST : SEARCH_ITEM_NESTED_PLAYLIST;
+    row->score = score;
+    strncpy(row->path, path, sizeof(row->path) - 1);
+    row->track_count = track_count;
+    row->format = AUDIO_FORMAT_UNKNOWN;
+
+    char parent_folder[64];
+    M3U_getPlaylistParentFolder(path, parent_folder, sizeof(parent_folder));
+
+    if (!is_root && parent_folder[0]) {
+        snprintf(row->label, sizeof(row->label), "%s / %s", parent_folder, title);
+    } else {
+        snprintf(row->label, sizeof(row->label), "%s", title);
+    }
+    snprintf(row->subtitle, sizeof(row->subtitle), "%d tracks", track_count);
+}
+
+static bool rebuild_index(const char* fp_str) {
+    if (!ensure_index_dir()) return false;
+    unlink_tmp_files();
+
+    FILE* songs_fp = fopen(SONGS_TMP, "w");
+    if (!songs_fp) return false;
+
+    int songs_written = 0;
+    int songs_truncated = 0;
 
     set_status("Scanning music...");
-  {
+    {
         char** paths = NULL;
-        int count = Playlist_collectPaths(MUSIC_PATH, &paths, LIBRARY_MAX_TRACKS);
-        if (count > 0 && paths) {
-            tracks = calloc(count, sizeof(IndexedTrack));
-            if (tracks) {
-                for (int i = 0; i < count; i++) {
-                    set_status("Reading tags...");
-                    IndexedTrack* tr = &tracks[track_count];
-                    strncpy(tr->path, paths[i], sizeof(tr->path) - 1);
-
-                    TrackMetadata meta;
-                    Metadata_readFromFile(paths[i], &meta);
-                    strncpy(tr->title, meta.title, sizeof(tr->title) - 1);
-                    strncpy(tr->artist, meta.artist, sizeof(tr->artist) - 1);
-                    strncpy(tr->album, meta.album, sizeof(tr->album) - 1);
-                    strncpy(tr->genre, meta.genre, sizeof(tr->genre) - 1);
-                    tr->format = Player_detectFormat(paths[i]);
-
-                    const char* base = strrchr(paths[i], '/');
-                    base = base ? base + 1 : paths[i];
-                    Metadata_copyNormalized(tr->filename_norm, sizeof(tr->filename_norm), base);
-
-                    track_count++;
-                }
-            }
-            Playlist_freePaths(paths, count);
+        int collected = Playlist_collectPaths(MUSIC_PATH, &paths, INDEX_MAX_ROWS + 1);
+        int write_count = collected;
+        if (collected > INDEX_MAX_ROWS) {
+            songs_truncated = 1;
+            write_count = INDEX_MAX_ROWS;
         }
+
+        for (int i = 0; i < write_count; i++) {
+            if ((i & 255) == 0) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "Indexing songs %d/%d", i + 1, write_count);
+                set_status(msg);
+            }
+
+            TrackMetadata meta;
+            Metadata_readFromFile(paths[i], &meta);
+
+            char path_field[512];
+            char title_field[256];
+            char album_field[256];
+            char artist_field[256];
+
+            sanitize_tsv_field(paths[i], path_field, sizeof(path_field));
+
+            const char* base = strrchr(paths[i], '/');
+            base = base ? base + 1 : paths[i];
+            char stem[256];
+            strncpy(stem, base, sizeof(stem) - 1);
+            char* ext = strrchr(stem, '.');
+            if (ext) *ext = '\0';
+
+            const char* title_src = meta.title[0] ? meta.title : stem;
+            sanitize_tsv_field(title_src, title_field, sizeof(title_field));
+            sanitize_tsv_field(meta.album, album_field, sizeof(album_field));
+            sanitize_tsv_field(meta.artist, artist_field, sizeof(artist_field));
+
+            fprintf(songs_fp, "%s\t%s\t%s\t%s\n",
+                    path_field, title_field, album_field, artist_field);
+            songs_written++;
+        }
+
+        if (paths) Playlist_freePaths(paths, collected);
     }
+
+    fclose(songs_fp);
+
+    if (songs_truncated) {
+        set_status("Song index full (65536 limit)");
+    }
+
+    FILE* pl_fp = fopen(PLAYLISTS_TMP, "w");
+    if (!pl_fp) {
+        unlink(SONGS_TMP);
+        return false;
+    }
+
+    int playlists_written = 0;
+    int playlists_truncated = 0;
 
     set_status("Scanning playlists...");
     {
         int limit = Settings_getMaxPlaylists();
+        if (limit > INDEX_MAX_ROWS + 1) limit = INDEX_MAX_ROWS + 1;
+
         PlaylistInfo* infos = calloc(limit, sizeof(PlaylistInfo));
         if (infos) {
             int n = M3U_listAllPlaylists(infos, limit, Settings_getPlaylistScanDepth());
-            if (n > 0) {
-                playlists = calloc(n, sizeof(IndexedPlaylist));
-                if (playlists) {
-                    for (int i = 0; i < n; i++) {
-                        if (infos[i].is_folder) continue;
+            if (n > INDEX_MAX_ROWS) {
+                playlists_truncated = 1;
+                n = INDEX_MAX_ROWS;
+            }
 
-                        IndexedPlaylist* pl = &playlists[playlist_count];
-                        strncpy(pl->path, infos[i].path, sizeof(pl->path) - 1);
-                        strncpy(pl->name, infos[i].name, sizeof(pl->name) - 1);
-                        pl->track_count = infos[i].track_count;
-                        pl->is_root = M3U_isRootPlaylist(infos[i].path);
-
-                        Metadata_copyNormalized(pl->name_norm, sizeof(pl->name_norm), infos[i].name);
-                        M3U_getPlaylistParentFolder(infos[i].path, pl->parent_folder, sizeof(pl->parent_folder));
-                        Metadata_copyNormalized(pl->parent_norm, sizeof(pl->parent_norm), pl->parent_folder);
-
-                        playlist_count++;
-                    }
+            for (int i = 0; i < n; i++) {
+                if (infos[i].is_folder) continue;
+                if (playlists_written >= INDEX_MAX_ROWS) {
+                    playlists_truncated = 1;
+                    break;
                 }
+
+                char path_field[512];
+                char title_field[256];
+                sanitize_tsv_field(infos[i].path, path_field, sizeof(path_field));
+                sanitize_tsv_field(infos[i].name, title_field, sizeof(title_field));
+
+                int is_root = M3U_isRootPlaylist(infos[i].path) ? 1 : 0;
+                fprintf(pl_fp, "%s\t%s\t%d\t%d\n",
+                        path_field, title_field, infos[i].track_count, is_root);
+                playlists_written++;
             }
             free(infos);
         }
     }
 
-    set_status("Building index...");
-    token_count = 0;
-    for (int i = 0; i < track_count; i++) index_track_tokens(i);
-    for (int i = 0; i < playlist_count; i++) index_playlist_tokens(i);
+    fclose(pl_fp);
+
+    if (playlists_truncated) {
+        set_status("Playlist index full (65536 limit)");
+    }
 
     set_status("Saving index...");
-    strncpy(saved_fingerprint, fp_str, sizeof(saved_fingerprint) - 1);
-    save_json_index(fp_str);
+    if (!write_meta_tmp(fp_str, songs_written, playlists_written,
+                        songs_truncated, playlists_truncated)) {
+        unlink_tmp_files();
+        return false;
+    }
 
-    char done[128];
-    snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
-    set_status(done);
+    if (!commit_index_files()) {
+        unlink_tmp_files();
+        return false;
+    }
+
+    cached_song_count = songs_written;
+    cached_playlist_count = playlists_written;
+    return true;
 }
 
 static void* build_thread_func(void* arg) {
@@ -537,23 +498,27 @@ static void* build_thread_func(void* arg) {
     char fp_str[64];
     fingerprint_to_string(&fp, fp_str, sizeof(fp_str));
 
+    bool ok = false;
     if (force_rebuild) {
-        unlink(INDEX_PATH);
-        free_index_data();
-        rebuild_index(fp_str);
-    } else {
-        set_status("Loading index...");
-        if (!load_json_index(fp_str)) {
-            rebuild_index(fp_str);
-        } else {
-            char done[128];
-            snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
-            set_status(done);
-        }
+        delete_index_files();
     }
 
+    if (!force_rebuild && index_cache_valid(fp_str)) {
+        ok = true;
+    } else {
+        ok = rebuild_index(fp_str);
+    }
+
+    char done[128];
+    if (ok) {
+        snprintf(done, sizeof(done), "Ready (%d songs)", cached_song_count);
+    } else {
+        snprintf(done, sizeof(done), "Index build failed");
+    }
+    set_status(done);
+
     pthread_mutex_lock(&index_mutex);
-    index_ready = true;
+    index_ready = ok;
     build_running = false;
     pthread_mutex_unlock(&index_mutex);
     return NULL;
@@ -594,7 +559,6 @@ bool LibraryIndex_requestRebuild(void) {
 }
 
 void LibraryIndex_quit(void) {
-    free_index_data();
     index_ready = false;
     build_started = false;
 }
@@ -617,134 +581,17 @@ const char* LibraryIndex_getBuildStatus(void) {
     return build_status;
 }
 
-typedef struct {
-    bool* track_hit;
-    bool* playlist_hit;
-} HitCtx;
-
-static void mark_hits_cb(const char* token, void* userdata) {
-    HitCtx* ctx = (HitCtx*)userdata;
-    int ti = find_token(token);
-    if (ti < 0) return;
-
-    IndexToken* t = &tokens[ti];
-    for (int i = 0; i < t->track_count; i++) {
-        int id = t->track_ids[i];
-        if (id >= 0 && id < track_count) ctx->track_hit[id] = true;
-    }
-    for (int i = 0; i < t->playlist_count; i++) {
-        int id = t->playlist_ids[i];
-        if (id >= 0 && id < playlist_count) ctx->playlist_hit[id] = true;
-    }
+void LibraryIndex_searchAbort(void) {
+    search_abort = true;
 }
 
-static int score_track(int id, const char query_tokens[][48], int query_token_count) {
-    if (id < 0 || id >= track_count) return 0;
-    IndexedTrack* tr = &tracks[id];
-    int score = 0;
-
-    for (int q = 0; q < query_token_count; q++) {
-        const char* qt = query_tokens[q];
-        char norm[256];
-
-        Metadata_copyNormalized(norm, sizeof(norm), tr->title);
-        if (strstr(norm, qt)) score += 10;
-        Metadata_copyNormalized(norm, sizeof(norm), tr->artist);
-        if (strstr(norm, qt)) score += 8;
-        Metadata_copyNormalized(norm, sizeof(norm), tr->album);
-        if (strstr(norm, qt)) score += 6;
-        Metadata_copyNormalized(norm, sizeof(norm), tr->genre);
-        if (strstr(norm, qt)) score += 4;
-        if (strstr(tr->filename_norm, qt)) score += 2;
-    }
-    return score;
+void LibraryIndex_searchClearAbort(void) {
+    search_abort = false;
+    search_timed_out = false;
 }
 
-static int score_nested_playlist(int id, const char query_tokens[][48], int query_token_count) {
-    if (id < 0 || id >= playlist_count) return 0;
-    IndexedPlaylist* pl = &playlists[id];
-    int score = 0;
-
-    for (int q = 0; q < query_token_count; q++) {
-        const char* qt = query_tokens[q];
-        if (strstr(pl->name_norm, qt)) score += 10;
-        if (strstr(pl->parent_norm, qt)) score += 6;
-    }
-    return score;
-}
-
-static int score_root_playlist(int id, const char query_tokens[][48], int query_token_count) {
-    if (id < 0 || id >= playlist_count) return 0;
-    IndexedPlaylist* pl = &playlists[id];
-    int score = 0;
-
-    for (int q = 0; q < query_token_count; q++) {
-        if (strstr(pl->name_norm, query_tokens[q])) score += 10;
-    }
-    return score;
-}
-
-typedef struct {
-    int id;
-    int score;
-    SearchResultType type;
-} ScoredItem;
-
-static int compare_scored(const void* a, const void* b) {
-    const ScoredItem* sa = (const ScoredItem*)a;
-    const ScoredItem* sb = (const ScoredItem*)b;
-    if (sb->score != sa->score) return sb->score - sa->score;
-    return sa->id - sb->id;
-}
-
-static void fill_track_row(SearchResultRow* row, int id, int score) {
-    IndexedTrack* tr = &tracks[id];
-    row->type = SEARCH_ITEM_TRACK;
-    row->score = score;
-    strncpy(row->path, tr->path, sizeof(row->path) - 1);
-    strncpy(row->label, tr->title[0] ? tr->title : tr->filename_norm, sizeof(row->label) - 1);
-
-    if (tr->artist[0] && tr->album[0]) {
-        snprintf(row->subtitle, sizeof(row->subtitle), "%s — %s", tr->artist, tr->album);
-    } else if (tr->artist[0]) {
-        snprintf(row->subtitle, sizeof(row->subtitle), "%s", tr->artist);
-    } else if (tr->album[0]) {
-        snprintf(row->subtitle, sizeof(row->subtitle), "%s", tr->album);
-    } else {
-        row->subtitle[0] = '\0';
-    }
-    row->track_count = 1;
-    row->format = tr->format;
-}
-
-static void fill_playlist_row(SearchResultRow* row, int id, int score, bool nested) {
-    IndexedPlaylist* pl = &playlists[id];
-    row->type = nested ? SEARCH_ITEM_NESTED_PLAYLIST : SEARCH_ITEM_USER_PLAYLIST;
-    row->score = score;
-    strncpy(row->path, pl->path, sizeof(row->path) - 1);
-    row->track_count = pl->track_count;
-    row->format = AUDIO_FORMAT_UNKNOWN;
-
-    if (nested && pl->parent_folder[0]) {
-        snprintf(row->label, sizeof(row->label), "%s / %s", pl->parent_folder, pl->name);
-        snprintf(row->subtitle, sizeof(row->subtitle), "%d tracks", pl->track_count);
-    } else {
-        snprintf(row->label, sizeof(row->label), "%s", pl->name);
-        snprintf(row->subtitle, sizeof(row->subtitle), "%d tracks", pl->track_count);
-    }
-}
-
-typedef struct {
-    char (*tokens)[48];
-    int count;
-} QueryCollectCtx;
-
-static void collect_query_token(const char* token, void* userdata) {
-    QueryCollectCtx* ctx = (QueryCollectCtx*)userdata;
-    if (ctx->count >= 32) return;
-    strncpy(ctx->tokens[ctx->count], token, 47);
-    ctx->tokens[ctx->count][47] = '\0';
-    ctx->count++;
+bool LibraryIndex_searchTimedOut(void) {
+    return search_timed_out;
 }
 
 bool LibraryIndex_search(const char* query, SearchResults* out) {
@@ -752,108 +599,125 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     memset(out, 0, sizeof(*out));
 
     if (!LibraryIndex_isReady()) return false;
-    if (track_count == 0 && playlist_count == 0) return false;
+    if (!file_exists(SONGS_TSV) && !file_exists(PLAYLISTS_TSV)) return false;
 
-    char query_tokens[32][48];
+    char query_tokens[32][SEARCH_FUSE_TOKEN_MAX];
     QueryCollectCtx qctx = {.tokens = query_tokens, .count = 0};
-
     Metadata_foreachToken(query, collect_query_token, &qctx);
-    int query_token_count = qctx.count;
-    if (query_token_count == 0) return false;
+    if (qctx.count == 0) return false;
 
-    bool* track_hit = calloc(track_count, sizeof(bool));
-    bool* playlist_hit = calloc(playlist_count, sizeof(bool));
-    if (!track_hit || !playlist_hit) {
-        free(track_hit);
-        free(playlist_hit);
-        return false;
-    }
+    char query_norm[256];
+    Metadata_copyNormalized(query_norm, sizeof(query_norm), query);
 
-    HitCtx hctx = {track_hit, playlist_hit};
-    for (int q = 0; q < query_token_count; q++) {
-        int ti = find_token(query_tokens[q]);
-        if (ti >= 0) {
-            IndexToken* t = &tokens[ti];
-            for (int i = 0; i < t->track_count; i++) {
-                int id = t->track_ids[i];
-                if (id >= 0 && id < track_count) track_hit[id] = true;
-            }
-            for (int i = 0; i < t->playlist_count; i++) {
-                int id = t->playlist_ids[i];
-                if (id >= 0 && id < playlist_count) playlist_hit[id] = true;
-            }
-        } else {
-            Metadata_foreachToken(query_tokens[q], mark_hits_cb, &hctx);
-        }
-    }
-
-    ScoredItem* nested_items = calloc(playlist_count, sizeof(ScoredItem));
-    ScoredItem* mixed_items = calloc(track_count + playlist_count, sizeof(ScoredItem));
+    SearchResultRow nested_heap[LIBRARY_SEARCH_MAX_TOP];
+    SearchResultRow mixed_heap[LIBRARY_SEARCH_MAX_MIXED];
     int nested_n = 0;
     int mixed_n = 0;
 
-    if (!nested_items || !mixed_items) {
-        free(track_hit);
-        free(playlist_hit);
-        free(nested_items);
-        free(mixed_items);
-        return false;
+    FILE* songs_fp = fopen(SONGS_TSV, "r");
+    if (songs_fp) {
+        char line[TSV_LINE_MAX];
+        int row = 0;
+        while (fgets(line, sizeof(line), songs_fp)) {
+            if (row >= INDEX_MAX_ROWS) break;
+            if (search_should_abort(row)) break;
+
+            char* fields[4];
+            if (parse_tsv_fields(line, fields, 4) < 4) {
+                row++;
+                continue;
+            }
+
+            const char* path = fields[0];
+            const char* title = fields[1];
+            const char* album = fields[2];
+            const char* artist = fields[3];
+
+            char title_norm[256];
+            char artist_norm[256];
+            char album_norm[256];
+            char file_norm[256];
+
+            Metadata_copyNormalized(title_norm, sizeof(title_norm), title);
+            Metadata_copyNormalized(artist_norm, sizeof(artist_norm), artist);
+            Metadata_copyNormalized(album_norm, sizeof(album_norm), album);
+
+            const char* base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            Metadata_copyNormalized(file_norm, sizeof(file_norm), base);
+
+            SearchFuseFields fields_fuse = {
+                .title = title_norm,
+                .artist = artist_norm,
+                .album = album_norm,
+                .genre = NULL,
+                .filename = file_norm
+            };
+
+            int score = SearchFuse_scoreFields(&fields_fuse, query_norm,
+                                               query_tokens, qctx.count, true);
+            if (score >= SEARCH_FUSE_MIN_SCORE) {
+                SearchResultRow row_out;
+                fill_song_result(&row_out, path, title, album, artist, score);
+                topk_insert(mixed_heap, &mixed_n, LIBRARY_SEARCH_MAX_MIXED, &row_out);
+            }
+            row++;
+        }
+        fclose(songs_fp);
     }
 
-    for (int i = 0; i < playlist_count; i++) {
-        if (!playlist_hit[i]) continue;
-        if (playlists[i].is_root) continue;
+    if (!search_abort) {
+        FILE* pl_fp = fopen(PLAYLISTS_TSV, "r");
+        if (pl_fp) {
+            char line[TSV_LINE_MAX];
+            int row = 0;
+            while (fgets(line, sizeof(line), pl_fp)) {
+                if (row >= INDEX_MAX_ROWS) break;
+                if (search_should_abort(row)) break;
 
-        int sc = score_nested_playlist(i, query_tokens, query_token_count);
-        if (sc <= 0) sc = 1;
-        nested_items[nested_n++] = (ScoredItem){
-            .id = i, .score = sc, .type = SEARCH_ITEM_NESTED_PLAYLIST
-        };
+                char* fields[4];
+                if (parse_tsv_fields(line, fields, 4) < 4) {
+                    row++;
+                    continue;
+                }
+
+                const char* path = fields[0];
+                const char* title = fields[1];
+                int track_count = atoi(fields[2]);
+                bool is_root = atoi(fields[3]) != 0;
+
+                int score = score_playlist_row(path, title, query_norm, query_tokens, qctx.count);
+                if (score >= SEARCH_FUSE_MIN_SCORE) {
+                    SearchResultRow row_out;
+                    fill_playlist_result(&row_out, path, title, track_count, is_root, score);
+                    if (is_root) {
+                        topk_insert(mixed_heap, &mixed_n, LIBRARY_SEARCH_MAX_MIXED, &row_out);
+                    } else {
+                        topk_insert(nested_heap, &nested_n, LIBRARY_SEARCH_MAX_TOP, &row_out);
+                    }
+                }
+                row++;
+            }
+            fclose(pl_fp);
+        }
     }
-    qsort(nested_items, nested_n, sizeof(ScoredItem), compare_scored);
+
+    if (nested_n > 1) qsort(nested_heap, nested_n, sizeof(SearchResultRow), compare_row_score);
+    if (mixed_n > 1) qsort(mixed_heap, mixed_n, sizeof(SearchResultRow), compare_row_score);
 
     int nested_take = nested_n < LIBRARY_SEARCH_MAX_TOP ? nested_n : LIBRARY_SEARCH_MAX_TOP;
     out->nested_count = nested_take;
     out->mixed_limit = LIBRARY_SEARCH_BASE_MIXED + (LIBRARY_SEARCH_MAX_TOP - nested_take);
 
     for (int i = 0; i < nested_take; i++) {
-        fill_playlist_row(&out->nested[i], nested_items[i].id, nested_items[i].score, true);
+        out->nested[i] = nested_heap[i];
     }
-
-    for (int i = 0; i < track_count; i++) {
-        if (!track_hit[i]) continue;
-        int sc = score_track(i, query_tokens, query_token_count);
-        if (sc <= 0) sc = 1;
-        mixed_items[mixed_n++] = (ScoredItem){
-            .id = i, .score = sc, .type = SEARCH_ITEM_TRACK
-        };
-    }
-    for (int i = 0; i < playlist_count; i++) {
-        if (!playlist_hit[i]) continue;
-        if (!playlists[i].is_root) continue;
-
-        int sc = score_root_playlist(i, query_tokens, query_token_count);
-        if (sc <= 0) sc = 1;
-        mixed_items[mixed_n++] = (ScoredItem){
-            .id = i, .score = sc, .type = SEARCH_ITEM_USER_PLAYLIST
-        };
-    }
-    qsort(mixed_items, mixed_n, sizeof(ScoredItem), compare_scored);
 
     int mixed_take = mixed_n < out->mixed_limit ? mixed_n : out->mixed_limit;
     out->mixed_count = mixed_take;
-
     for (int i = 0; i < mixed_take; i++) {
-        if (mixed_items[i].type == SEARCH_ITEM_TRACK) {
-            fill_track_row(&out->mixed[i], mixed_items[i].id, mixed_items[i].score);
-        } else {
-            fill_playlist_row(&out->mixed[i], mixed_items[i].id, mixed_items[i].score, false);
-        }
+        out->mixed[i] = mixed_heap[i];
     }
 
-    free(track_hit);
-    free(playlist_hit);
-    free(nested_items);
-    free(mixed_items);
     return out->nested_count > 0 || out->mixed_count > 0;
 }

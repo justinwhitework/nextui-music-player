@@ -65,6 +65,35 @@ void render_search_query(SDL_Surface* screen, int show_setting, const char* quer
     GFX_blitButtonGroup((char*[]){"B", "BACK", "A", "SEARCH", NULL}, 1, screen, 1);
 }
 
+void render_search_searching(SDL_Surface* screen, int show_setting, const char* query) {
+    GFX_clear(screen);
+    render_screen_header(screen, "Library Search", show_setting);
+
+    SDL_Surface* status = TTF_RenderUTF8_Blended(Fonts_getMedium(), "Searching...", COLOR_WHITE);
+    if (status) {
+        SDL_BlitSurface(status, NULL, screen, &(SDL_Rect){
+            (screen->w - status->w) / 2,
+            screen->h / 2 - SCALE1(20)
+        });
+        SDL_FreeSurface(status);
+    }
+
+    if (query && query[0]) {
+        char line[280];
+        snprintf(line, sizeof(line), "\"%s\"", query);
+        SDL_Surface* q = TTF_RenderUTF8_Blended(Fonts_getSmall(), line, COLOR_GRAY);
+        if (q) {
+            SDL_BlitSurface(q, NULL, screen, &(SDL_Rect){
+                (screen->w - q->w) / 2,
+                screen->h / 2 + SCALE1(4)
+            });
+            SDL_FreeSurface(q);
+        }
+    }
+
+    GFX_blitButtonGroup((char*[]){"B", "CANCEL", NULL}, 1, screen, 1);
+}
+
 int search_results_total_count(const SearchResults* results) {
     if (!results) return 0;
     int total = results->mixed_count;

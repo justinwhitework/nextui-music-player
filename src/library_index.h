@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include "player.h"
 
+#define INDEX_MAX_ROWS 65536
+
 #define LIBRARY_SEARCH_MAX_TOP 5
 #define LIBRARY_SEARCH_BASE_MIXED 25
 #define LIBRARY_SEARCH_MAX_MIXED 30
@@ -40,6 +42,10 @@ bool LibraryIndex_isBuilding(void);
 const char* LibraryIndex_getBuildStatus(void);
 
 bool LibraryIndex_search(const char* query, SearchResults* out);
+
+void LibraryIndex_searchAbort(void);
+void LibraryIndex_searchClearAbort(void);
+bool LibraryIndex_searchTimedOut(void);
 
 // Force a full index rebuild in the background. Returns false if already building.
 bool LibraryIndex_requestRebuild(void);
