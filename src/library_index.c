@@ -202,6 +202,7 @@ static int build_log_slot(int index) {
 
 #define INDEX_VERBOSE_TRACKS 32
 #define INDEX_VERBOSE_EVERY 512
+#define INDEX_MEM_LOG_EVERY 256
 
 static bool index_verbose_step(int next_track_idx) {
     return next_track_idx < INDEX_VERBOSE_TRACKS ||
@@ -1983,6 +1984,10 @@ static void union_token_hits(const int* hits, int hit_count, int required,
         if (hits[i] >= required && !selected[i]) selected[i] = true;
     }
 }
+
+static int score_track_fuse(int id, const char* query_norm,
+                            const char query_tokens[][48], int query_token_count,
+                            bool fuzzy);
 
 static void gather_track_candidates_fuse_scan(const char query_tokens[][48], int query_token_count,
                                               bool fuzzy, bool* track_candidate) {
