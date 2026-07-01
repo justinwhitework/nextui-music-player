@@ -850,8 +850,8 @@ static bool load_bin_index(uint64_t expected_fp) {
                 return false;
             }
             copy_track_from_bin(&bt, &tracks[track_count]);
-            index_track_tokens(track_count);
             track_count++;
+            index_track_tokens(track_count - 1);
         }
     }
 
@@ -976,8 +976,8 @@ static bool load_json_index(uint64_t expected_fp) {
             JSON_Object* to = json_array_get_object(track_arr, i);
             if (!to) continue;
             load_indexed_track_from_json(to, &tracks[track_count]);
-            index_track_tokens(track_count);
             track_count++;
+            index_track_tokens(track_count - 1);
         }
     }
 
@@ -1128,8 +1128,8 @@ static void rebuild_index(uint64_t fp) {
                         tr->file_size = (uint64_t)st.st_size;
                     }
 
-                    index_track_tokens(track_count);
                     track_count++;
+                    index_track_tokens(track_count - 1);
 
                     if (track_count == 1) {
                         char logbuf[160];
@@ -1221,6 +1221,12 @@ static void rebuild_index(uint64_t fp) {
 
     index_log("rebuild_index: playlist tokens begin");
     for (int i = 0; i < playlist_count; i++) {
+        if ((i & 255) == 0) {
+            char logbuf[96];
+            snprintf(logbuf, sizeof(logbuf), "rebuild_index: playlist tokens %d/%d",
+                     i, playlist_count);
+            index_log(logbuf);
+        }
         index_playlist_tokens(i);
     }
     {
