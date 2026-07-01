@@ -638,6 +638,28 @@ static void load_track_from_json_object(JSON_Object* to, TrackCacheEntry* entry)
     entry->bin_offset = -1;
 }
 
+static void load_indexed_track_from_json(JSON_Object* to, IndexedTrack* tr) {
+    if (!to || !tr) return;
+    memset(tr, 0, sizeof(*tr));
+
+    const char* path = json_object_get_string(to, "path");
+    if (path) strncpy(tr->path, path, sizeof(tr->path) - 1);
+    const char* title = json_object_get_string(to, "title");
+    if (title) strncpy(tr->title, title, sizeof(tr->title) - 1);
+    const char* artist = json_object_get_string(to, "artist");
+    if (artist) strncpy(tr->artist, artist, sizeof(tr->artist) - 1);
+    const char* album = json_object_get_string(to, "album");
+    if (album) strncpy(tr->album, album, sizeof(tr->album) - 1);
+    const char* genre = json_object_get_string(to, "genre");
+    if (genre) strncpy(tr->genre, genre, sizeof(tr->genre) - 1);
+    const char* fn = json_object_get_string(to, "filename_norm");
+    if (fn) strncpy(tr->filename_norm, fn, sizeof(tr->filename_norm) - 1);
+    tr->format = (AudioFormat)json_object_get_number(to, "format");
+    tr->file_mtime = (uint64_t)json_object_get_number(to, "mtime");
+    tr->file_size = (uint64_t)json_object_get_number(to, "size");
+    index_track_norms(tr);
+}
+
 static TrackCacheEntry* load_track_cache_from_bin(int* out_count) {
     if (out_count) *out_count = 0;
 
@@ -968,28 +990,6 @@ static bool load_json_index(uint64_t expected_fp) {
         unlink(INDEX_JSON_PATH);
     }
     return true;
-}
-
-static void load_indexed_track_from_json(JSON_Object* to, IndexedTrack* tr) {
-    if (!to || !tr) return;
-    memset(tr, 0, sizeof(*tr));
-
-    const char* path = json_object_get_string(to, "path");
-    if (path) strncpy(tr->path, path, sizeof(tr->path) - 1);
-    const char* title = json_object_get_string(to, "title");
-    if (title) strncpy(tr->title, title, sizeof(tr->title) - 1);
-    const char* artist = json_object_get_string(to, "artist");
-    if (artist) strncpy(tr->artist, artist, sizeof(tr->artist) - 1);
-    const char* album = json_object_get_string(to, "album");
-    if (album) strncpy(tr->album, album, sizeof(tr->album) - 1);
-    const char* genre = json_object_get_string(to, "genre");
-    if (genre) strncpy(tr->genre, genre, sizeof(tr->genre) - 1);
-    const char* fn = json_object_get_string(to, "filename_norm");
-    if (fn) strncpy(tr->filename_norm, fn, sizeof(tr->filename_norm) - 1);
-    tr->format = (AudioFormat)json_object_get_number(to, "format");
-    tr->file_mtime = (uint64_t)json_object_get_number(to, "mtime");
-    tr->file_size = (uint64_t)json_object_get_number(to, "size");
-    index_track_norms(tr);
 }
 
 static void index_playlist_tokens(int id) {
