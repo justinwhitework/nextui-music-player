@@ -37,6 +37,8 @@
 #define INDEX_BIN_MAGIC 0x49504D4E
 #define FP_MAX_DEPTH 16
 #define INDEX_BUILD_STACK_SIZE (512 * 1024)
+#define BUILD_LOG_MAX_LINES 256
+#define BUILD_LOG_LINE_LEN 160
 
 typedef struct {
     char path[512];
@@ -127,7 +129,6 @@ static pthread_mutex_t index_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool build_started = false;
 static bool build_running = false;
 static bool index_ready = false;
-static char build_status[128] = "Starting...";
 
 static IndexedTrack* tracks = NULL;
 static int track_count = 0;
@@ -144,6 +145,39 @@ static int token_hash_node_cap = 0;
 
 static uint64_t saved_fingerprint = 0;
 
+static char build_status[128] = "Starting...";
+static char build_log_lines[BUILD_LOG_MAX_LINES][BUILD_LOG_LINE_LEN];
+static int build_log_count = 0;
+static int build_log_start = 0;
+
+static void build_log_clear(void) {
+    pthread_mutex_lock(&index_mutex);
+    build_log_count = 0;
+    build_log_start = 0;
+    pthread_mutex_unlock(&index_mutex);
+}
+
+static void build_log_append(const char* msg) {
+    if (!msg) return;
+
+    pthread_mutex_lock(&index_mutex);
+    int slot;
+    if (build_log_count < BUILD_LOG_MAX_LINES) {
+        slot = build_log_count++;
+    } else {
+        slot = build_log_start;
+        build_log_start = (build_log_start + 1) % BUILD_LOG_MAX_LINES;
+    }
+    snprintf(build_log_lines[slot], BUILD_LOG_LINE_LEN, "%s", msg);
+    pthread_mutex_unlock(&index_mutex);
+}
+
+static int build_log_slot(int index) {
+    if (index < 0 || index >= build_log_count) return -1;
+    if (build_log_count < BUILD_LOG_MAX_LINES) return index;
+    return (build_log_start + index) % BUILD_LOG_MAX_LINES;
+}
+
 static void set_status(const char* msg) {
     pthread_mutex_lock(&index_mutex);
     snprintf(build_status, sizeof(build_status), "%s", msg ? msg : "");
@@ -151,7 +185,9 @@ static void set_status(const char* msg) {
 }
 
 static void index_log(const char* msg) {
-    if (!msg || !Settings_getIndexLog()) return;
+    if (!msg) return;
+    build_log_append(msg);
+    if (!Settings_getIndexLog()) return;
     mkdir(SHARED_USERDATA_PATH "/music-player", 0755);
     FILE* f = fopen(INDEX_LOG_PATH, "a");
     if (!f) return;
@@ -486,19 +522,36 @@ static void clear_token_index(void) {
     token_hash_clear();
 }
 
-static void rebuild_token_index(void) {
+static void rebuild_token_index(const char* phase) {
+    char logbuf[128];
+    snprintf(logbuf, sizeof(logbuf), "token_index[%s]: start tracks=%d playlists=%d",
+             phase ? phase : "?", track_count, playlist_count);
+    index_log(logbuf);
+
     clear_token_index();
     char status[128];
     for (int i = 0; i < track_count; i++) {
-        if ((i & 255) == 0) {
+        if ((i & 1023) == 0) {
             snprintf(status, sizeof(status), "Building index... tracks %d/%d", i, track_count);
             set_status(status);
+            snprintf(logbuf, sizeof(logbuf), "token_index[%s]: tracks %d/%d tokens=%d",
+                     phase ? phase : "?", i, track_count, token_count);
+            index_log(logbuf);
         }
         index_track_tokens(i);
     }
     for (int i = 0; i < playlist_count; i++) {
+        if ((i & 255) == 0 && playlist_count > 0) {
+            snprintf(logbuf, sizeof(logbuf), "token_index[%s]: playlists %d/%d",
+                     phase ? phase : "?", i, playlist_count);
+            index_log(logbuf);
+        }
         index_playlist_tokens(i);
     }
+
+    snprintf(logbuf, sizeof(logbuf), "token_index[%s]: done tokens=%d",
+             phase ? phase : "?", token_count);
+    index_log(logbuf);
 }
 
 typedef struct {
@@ -854,7 +907,7 @@ static bool load_bin_index(uint64_t expected_fp) {
 
     fclose(f);
     index_log("load_bin_index: rebuilding token index");
-    rebuild_token_index();
+    rebuild_token_index("load");
     saved_fingerprint = expected_fp;
     return true;
 }
@@ -982,7 +1035,7 @@ static bool load_json_index(uint64_t expected_fp) {
         }
     }
 
-    rebuild_token_index();
+    rebuild_token_index("json");
     saved_fingerprint = expected_fp;
     json_value_free(root);
 
@@ -1030,14 +1083,26 @@ static void rebuild_index(uint64_t fp) {
             tracks = calloc((size_t)tracks_cap, sizeof(IndexedTrack));
             if (tracks) {
                 char status[128];
+                int cache_hits = 0;
+                int tag_reads = 0;
+                int stat_skips = 0;
+                index_log("rebuild_index: reading tags begin");
                 for (int i = 0; i < count; i++) {
-                    if ((i & 63) == 0) {
+                    if ((i & 511) == 0) {
                         snprintf(status, sizeof(status), "Reading tags... %d/%d", i, count);
                         set_status(status);
+                        char logbuf[128];
+                        snprintf(logbuf, sizeof(logbuf),
+                                 "rebuild_index: tags %d/%d hits=%d reads=%d skips=%d",
+                                 i, count, cache_hits, tag_reads, stat_skips);
+                        index_log(logbuf);
                     }
 
                     struct stat st;
-                    if (stat(paths[i], &st) != 0 || !S_ISREG(st.st_mode)) continue;
+                    if (stat(paths[i], &st) != 0 || !S_ISREG(st.st_mode)) {
+                        stat_skips++;
+                        continue;
+                    }
 
                     if (track_count >= tracks_cap) {
                         int new_cap = tracks_cap * 2;
@@ -1052,6 +1117,9 @@ static void rebuild_index(uint64_t fp) {
                                (size_t)(new_cap - tracks_cap) * sizeof(IndexedTrack));
                         tracks = grown;
                         tracks_cap = new_cap;
+                        char logbuf[96];
+                        snprintf(logbuf, sizeof(logbuf), "rebuild_index: tracks cap %d", tracks_cap);
+                        index_log(logbuf);
                     }
 
                     IndexedTrack* tr = &tracks[track_count];
@@ -1060,8 +1128,9 @@ static void rebuild_index(uint64_t fp) {
                         cached->file_mtime == (uint64_t)st.st_mtime &&
                         cached->file_size == (uint64_t)st.st_size &&
                         track_cache_apply(cached, tr)) {
-                        /* cache hit */
+                        cache_hits++;
                     } else {
+                        tag_reads++;
                         memset(tr, 0, sizeof(*tr));
                         strncpy(tr->path, paths[i], sizeof(tr->path) - 1);
                         tr->format = Player_detectFormat(paths[i]);
@@ -1088,8 +1157,10 @@ static void rebuild_index(uint64_t fp) {
                 snprintf(status, sizeof(status), "Reading tags... %d/%d", count, count);
                 set_status(status);
                 {
-                    char logbuf[96];
-                    snprintf(logbuf, sizeof(logbuf), "rebuild_index: indexed %d tracks", track_count);
+                    char logbuf[128];
+                    snprintf(logbuf, sizeof(logbuf),
+                             "rebuild_index: tags done indexed=%d hits=%d reads=%d skips=%d cap=%d",
+                             track_count, cache_hits, tag_reads, stat_skips, tracks_cap);
                     index_log(logbuf);
                 }
             } else {
@@ -1101,24 +1172,37 @@ static void rebuild_index(uint64_t fp) {
     free(cache);
 
     set_status("Building track index...");
-    rebuild_token_index();
+    index_log("rebuild_index: partial token index begin");
+    rebuild_token_index("partial");
     set_index_ready(true);
+    index_log("rebuild_index: partial token index done, search enabled");
 
     char partial[128];
     snprintf(partial, sizeof(partial), "Ready tracks (%d), scanning playlists...", track_count);
     set_status(partial);
 
     set_status("Scanning playlists...");
+    index_log("rebuild_index: playlist scan begin");
     {
         int limit = Settings_getMaxPlaylists();
+        char logbuf[96];
+        snprintf(logbuf, sizeof(logbuf), "rebuild_index: playlist limit=%d depth=%d",
+                 limit, Settings_getPlaylistScanDepth());
+        index_log(logbuf);
         PlaylistInfo* infos = calloc(limit, sizeof(PlaylistInfo));
-        if (infos) {
+        if (!infos) {
+            index_log("rebuild_index: playlist infos alloc failed");
+        } else {
             int n = M3U_listAllPlaylistsEx(infos, limit, Settings_getPlaylistScanDepth(), true);
+            snprintf(logbuf, sizeof(logbuf), "rebuild_index: playlist scan returned %d", n);
+            index_log(logbuf);
             if (n > 0) {
                 free(playlists);
                 playlists = calloc(n, sizeof(IndexedPlaylist));
                 playlist_count = 0;
-                if (playlists) {
+                if (!playlists) {
+                    index_log("rebuild_index: playlists alloc failed");
+                } else {
                     for (int i = 0; i < n; i++) {
                         if (infos[i].is_folder) continue;
 
@@ -1134,6 +1218,8 @@ static void rebuild_index(uint64_t fp) {
 
                         playlist_count++;
                     }
+                    snprintf(logbuf, sizeof(logbuf), "rebuild_index: indexed %d playlists", playlist_count);
+                    index_log(logbuf);
                 }
             }
             free(infos);
@@ -1141,13 +1227,16 @@ static void rebuild_index(uint64_t fp) {
     }
 
     set_status("Building index...");
-    rebuild_token_index();
+    index_log("rebuild_index: final token index begin");
+    rebuild_token_index("final");
 
     set_status("Saving index...");
+    index_log("rebuild_index: save begin");
     saved_fingerprint = fp;
-    save_bin_index(fp);
-
+    int save_rc = save_bin_index(fp);
     char done[128];
+    snprintf(done, sizeof(done), "rebuild_index: save rc=%d", save_rc);
+    index_log(done);
     snprintf(done, sizeof(done), "Ready (%d tracks)", track_count);
     set_status(done);
     snprintf(done, sizeof(done), "rebuild_index: done (%d tracks, %d playlists)", track_count, playlist_count);
@@ -1230,15 +1319,16 @@ static bool start_build_thread(bool force_rebuild) {
 void LibraryIndex_init(void) {
     if (build_started) return;
     build_started = true;
+    build_log_clear();
     snprintf(build_status, sizeof(build_status), "Starting...");
-    if (Settings_getIndexLog()) {
-        unlink(INDEX_LOG_PATH);
-        index_log("LibraryIndex_init");
-    }
+    if (Settings_getIndexLog()) unlink(INDEX_LOG_PATH);
+    index_log("LibraryIndex_init");
     start_build_thread(false);
 }
 
 bool LibraryIndex_requestRebuild(void) {
+    build_log_clear();
+    if (Settings_getIndexLog()) unlink(INDEX_LOG_PATH);
     set_status("Rebuilding index...");
     return start_build_thread(true);
 }
@@ -1265,6 +1355,27 @@ bool LibraryIndex_isBuilding(void) {
 
 const char* LibraryIndex_getBuildStatus(void) {
     return build_status;
+}
+
+int LibraryIndex_getBuildLogCount(void) {
+    pthread_mutex_lock(&index_mutex);
+    int count = build_log_count;
+    pthread_mutex_unlock(&index_mutex);
+    return count;
+}
+
+const char* LibraryIndex_getBuildLogLine(int index) {
+    static char line_buf[BUILD_LOG_LINE_LEN];
+    pthread_mutex_lock(&index_mutex);
+    int slot = build_log_slot(index);
+    if (slot < 0) {
+        line_buf[0] = '\0';
+    } else {
+        strncpy(line_buf, build_log_lines[slot], sizeof(line_buf) - 1);
+        line_buf[sizeof(line_buf) - 1] = '\0';
+    }
+    pthread_mutex_unlock(&index_mutex);
+    return line_buf;
 }
 
 static bool edit_distance_le1(const char* a, const char* b) {

@@ -17,11 +17,13 @@ int search_home_item_count(void);
 SearchHomeItemType search_home_item_type(int index);
 const char* search_home_item_label(int index);
 
-void render_search_building(SDL_Surface* screen, int show_setting, const char* status);
+void render_search_building(SDL_Surface* screen, int show_setting, const char* status,
+                            bool show_log, int log_scroll);
 
 void render_search_home(SDL_Surface* screen, int show_setting, int selected, int scroll);
 
-void render_search_rebuilding(SDL_Surface* screen, int show_setting, const char* status);
+void render_search_rebuilding(SDL_Surface* screen, int show_setting, const char* status,
+                              bool show_log, int log_scroll);
 
 void render_search_results(SDL_Surface* screen, int show_setting,
                            const char* query,

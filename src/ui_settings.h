@@ -9,7 +9,8 @@
 void render_settings_menu(SDL_Surface* screen, int show_setting, int menu_selected, int menu_scroll);
 
 // Render library search index rebuild progress
-void render_index_rebuilding(SDL_Surface* screen, int show_setting, const char* status);
+void render_index_rebuilding(SDL_Surface* screen, int show_setting, const char* status,
+                             bool show_log, int log_scroll);
 
 // Render yt-dlp update progress screen
 void render_ytdlp_updating(SDL_Surface* screen, int show_setting);

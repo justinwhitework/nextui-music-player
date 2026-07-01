@@ -39,6 +39,9 @@ bool LibraryIndex_isReady(void);
 bool LibraryIndex_isBuilding(void);
 const char* LibraryIndex_getBuildStatus(void);
 
+int LibraryIndex_getBuildLogCount(void);
+const char* LibraryIndex_getBuildLogLine(int index);
+
 bool LibraryIndex_search(const char* query, SearchResults* out);
 
 // Force a full index rebuild in the background. Returns false if already building.

@@ -6,6 +6,7 @@
 #include "ui_icons.h"
 #include "player.h"
 #include "module_common.h"
+#include "library_index.h"
 
 // Format duration as MM:SS
 void format_time(char* buf, int ms) {
@@ -776,6 +777,78 @@ void render_simple_menu(SDL_Surface* screen, int show_setting, int menu_selected
     } else {
         GFX_blitButtonGroup((char*[]){"B", (char*)config->btn_b_label, "A", "OPEN", NULL}, 1, screen, 1);
     }
+}
+
+
+// ============================================
+// Index build progress / log
+// ============================================
+
+int calc_index_build_log_lines_per_page(SDL_Surface* screen) {
+    int line_h = TTF_FontHeight(Fonts_getSmall());
+    if (line_h < 1) line_h = 1;
+    int list_y = SCALE1(50);
+    int list_bottom = screen->h - SCALE1(30);
+    int available = list_bottom - list_y;
+    if (available < line_h) return 1;
+    return available / line_h;
+}
+
+void render_index_build_screen(SDL_Surface* screen, int show_setting,
+                               const char* title, const char* status,
+                               bool show_log, int log_scroll) {
+    GFX_clear(screen);
+    render_screen_header(screen, title ? title : "Index Build", show_setting);
+
+    if (!show_log) {
+        const char* msg = (status && status[0]) ? status : "Building index...";
+        SDL_Surface* text = TTF_RenderUTF8_Blended(Fonts_getMedium(), msg, COLOR_WHITE);
+        if (text) {
+            SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
+                (screen->w - text->w) / 2,
+                screen->h / 2 - text->h / 2
+            });
+            SDL_FreeSurface(text);
+        }
+        GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
+        GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "LOG", NULL}, 1, screen, 1);
+        return;
+    }
+
+    int total = LibraryIndex_getBuildLogCount();
+    int lines_per_page = calc_index_build_log_lines_per_page(screen);
+    int line_h = TTF_FontHeight(Fonts_getSmall());
+    int list_y = SCALE1(50);
+
+    if (log_scroll < 0) log_scroll = 0;
+    if (total > lines_per_page && log_scroll > total - lines_per_page) {
+        log_scroll = total - lines_per_page;
+    }
+
+    if (total == 0) {
+        SDL_Surface* empty = TTF_RenderUTF8_Blended(Fonts_getSmall(), "(no log lines yet)", COLOR_GRAY);
+        if (empty) {
+            SDL_BlitSurface(empty, NULL, screen, &(SDL_Rect){
+                SCALE1(BUTTON_PADDING), list_y
+            });
+            SDL_FreeSurface(empty);
+        }
+    } else {
+        for (int vis = 0; vis < lines_per_page && (log_scroll + vis) < total; vis++) {
+            const char* line = LibraryIndex_getBuildLogLine(log_scroll + vis);
+            SDL_Surface* text = TTF_RenderUTF8_Blended(Fonts_getSmall(), line, COLOR_WHITE);
+            if (text) {
+                SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
+                    SCALE1(BUTTON_PADDING), list_y + vis * line_h
+                });
+                SDL_FreeSurface(text);
+            }
+        }
+    }
+
+    render_scroll_indicators(screen, log_scroll, lines_per_page, total);
+    GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
+    GFX_blitButtonGroup((char*[]){"B", "BACK", "Y", "STATUS", "UP/DOWN", "SCROLL", NULL}, 1, screen, 1);
 }
 
 

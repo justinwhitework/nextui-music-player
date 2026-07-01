@@ -270,4 +270,9 @@ void render_empty_state(SDL_Surface* screen, const char* message,
 void render_list_icon(SDL_Surface* screen, int x, int y, int size,
                       SDL_Surface* artwork, AudioFormat format, bool selected);
 
+int calc_index_build_log_lines_per_page(SDL_Surface* screen);
+void render_index_build_screen(SDL_Surface* screen, int show_setting,
+                               const char* title, const char* status,
+                               bool show_log, int log_scroll);
+
 #endif

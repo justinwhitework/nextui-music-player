@@ -43,6 +43,49 @@ static int detail_scroll = 0;
 static char detail_title[256] = "";
 static char detail_m3u_path[512] = "";
 static bool detail_is_single_track = false;
+static bool show_index_log = false;
+static int index_log_scroll = 0;
+static bool index_log_user_scrolled = false;
+
+static void index_log_scroll_to_end(SDL_Surface* screen, int* scroll) {
+    int total = LibraryIndex_getBuildLogCount();
+    int lines_per_page = calc_index_build_log_lines_per_page(screen);
+    int end = total - lines_per_page;
+    *scroll = end > 0 ? end : 0;
+}
+
+static bool handle_index_build_input(SDL_Surface* screen, bool building) {
+    if (!building) return false;
+
+    if (PAD_justPressed(BTN_Y)) {
+        show_index_log = !show_index_log;
+        if (show_index_log) {
+            index_log_user_scrolled = false;
+            index_log_scroll_to_end(screen, &index_log_scroll);
+        }
+        return true;
+    }
+
+    if (!show_index_log) return false;
+
+    if (!index_log_user_scrolled) {
+        index_log_scroll_to_end(screen, &index_log_scroll);
+    }
+
+    int total = LibraryIndex_getBuildLogCount();
+    int lines_per_page = calc_index_build_log_lines_per_page(screen);
+    if (PAD_justRepeated(BTN_UP) && index_log_scroll > 0) {
+        index_log_user_scrolled = true;
+        index_log_scroll--;
+        return true;
+    }
+    if (PAD_justRepeated(BTN_DOWN) && index_log_scroll < total - lines_per_page) {
+        index_log_user_scrolled = true;
+        index_log_scroll++;
+        return true;
+    }
+    return false;
+}
 
 static bool results_index_is_header(const SearchResults* results, int idx) {
     return results && results->nested_count > 0 && idx == 0;
@@ -271,21 +314,26 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
 
         if (state == SEARCH_STATE_BUILDING) {
             dirty = 1;
+            if (handle_index_build_input(screen, true)) dirty = 1;
             if (LibraryIndex_isReady()) {
                 state = SEARCH_STATE_QUERY;
+                show_index_log = false;
                 dirty = 1;
             }
             if (PAD_justPressed(BTN_B)) return MODULE_EXIT_TO_MENU;
         }
         else if (state == SEARCH_STATE_REBUILDING) {
             dirty = 1;
+            if (handle_index_build_input(screen, true)) dirty = 1;
             if (LibraryIndex_isReady() && !LibraryIndex_isBuilding()) {
                 state = SEARCH_STATE_QUERY;
+                show_index_log = false;
                 show_toast("Index rebuild complete");
                 dirty = 1;
             }
             if (PAD_justPressed(BTN_B)) {
                 state = SEARCH_STATE_QUERY;
+                show_index_log = false;
                 dirty = 1;
             }
         }
@@ -427,7 +475,8 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
         if (dirty) {
             switch (state) {
                 case SEARCH_STATE_BUILDING:
-                    render_search_building(screen, show_setting, LibraryIndex_getBuildStatus());
+                    render_search_building(screen, show_setting, LibraryIndex_getBuildStatus(),
+                                           show_index_log, index_log_scroll);
                     break;
                 case SEARCH_STATE_QUERY: {
                     int items_per_page = calc_list_layout(screen).items_per_page;
@@ -452,7 +501,8 @@ ModuleExitReason SearchModule_run(SDL_Surface* screen) {
                     break;
                 }
                 case SEARCH_STATE_REBUILDING:
-                    render_search_rebuilding(screen, show_setting, LibraryIndex_getBuildStatus());
+                    render_search_rebuilding(screen, show_setting, LibraryIndex_getBuildStatus(),
+                                             show_index_log, index_log_scroll);
                     break;
             }
 

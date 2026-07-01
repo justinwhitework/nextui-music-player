@@ -45,6 +45,45 @@ typedef enum {
 #define SETTINGS_INTERNAL_MENU      40
 #define SETTINGS_INTERNAL_ABOUT     41
 
+static bool settings_show_index_log = false;
+static int settings_index_log_scroll = 0;
+static bool settings_index_log_user_scrolled = false;
+
+static void settings_index_log_scroll_to_end(SDL_Surface* screen, int* scroll) {
+    int total = LibraryIndex_getBuildLogCount();
+    int lines_per_page = calc_index_build_log_lines_per_page(screen);
+    int end = total - lines_per_page;
+    *scroll = end > 0 ? end : 0;
+}
+
+static void settings_handle_index_build_input(SDL_Surface* screen) {
+    if (PAD_justPressed(BTN_Y)) {
+        settings_show_index_log = !settings_show_index_log;
+        if (settings_show_index_log) {
+            settings_index_log_user_scrolled = false;
+            settings_index_log_scroll_to_end(screen, &settings_index_log_scroll);
+        }
+        return;
+    }
+
+    if (!settings_show_index_log) return;
+
+    if (!settings_index_log_user_scrolled) {
+        settings_index_log_scroll_to_end(screen, &settings_index_log_scroll);
+    }
+
+    int total = LibraryIndex_getBuildLogCount();
+    int lines_per_page = calc_index_build_log_lines_per_page(screen);
+    if (PAD_justRepeated(BTN_UP) && settings_index_log_scroll > 0) {
+        settings_index_log_user_scrolled = true;
+        settings_index_log_scroll--;
+    } else if (PAD_justRepeated(BTN_DOWN) &&
+               settings_index_log_scroll < total - lines_per_page) {
+        settings_index_log_user_scrolled = true;
+        settings_index_log_scroll++;
+    }
+}
+
 ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
     SettingsState state = SETTINGS_STATE_MENU;
     int menu_selected = 0;
@@ -221,12 +260,15 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                 break;
 
             case SETTINGS_STATE_REBUILDING_INDEX:
+                settings_handle_index_build_input(screen);
                 if (LibraryIndex_isReady() && !LibraryIndex_isBuilding()) {
                     state = SETTINGS_STATE_MENU;
+                    settings_show_index_log = false;
                     dirty = 1;
                 }
                 if (PAD_justPressed(BTN_B)) {
                     state = SETTINGS_STATE_MENU;
+                    settings_show_index_log = false;
                     dirty = 1;
                 }
                 dirty = 1;
@@ -324,7 +366,8 @@ ModuleExitReason SettingsModule_run(SDL_Surface* screen) {
                     render_confirmation_dialog(screen, NULL, "Rebuild library search index?");
                     break;
                 case SETTINGS_STATE_REBUILDING_INDEX:
-                    render_index_rebuilding(screen, show_setting, LibraryIndex_getBuildStatus());
+                    render_index_rebuilding(screen, show_setting, LibraryIndex_getBuildStatus(),
+                                            settings_show_index_log, settings_index_log_scroll);
                     break;
                 case SETTINGS_STATE_ABOUT:
                     render_about(screen, show_setting);

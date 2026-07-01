@@ -87,40 +87,14 @@ static SDL_Surface* search_home_icon(int index, bool selected, int icon_size) {
     }
 }
 
-void render_search_building(SDL_Surface* screen, int show_setting, const char* status) {
-    GFX_clear(screen);
-    render_screen_header(screen, "Library Search", show_setting);
-
-    const char* msg = (status && status[0]) ? status : "Building index...";
-    SDL_Surface* text = TTF_RenderUTF8_Blended(Fonts_getMedium(), msg, COLOR_WHITE);
-    if (text) {
-        SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
-            (screen->w - text->w) / 2,
-            screen->h / 2 - text->h / 2
-        });
-        SDL_FreeSurface(text);
-    }
-
-    GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", "BACK", NULL}, 1, screen, 1);
+void render_search_building(SDL_Surface* screen, int show_setting, const char* status,
+                            bool show_log, int log_scroll) {
+    render_index_build_screen(screen, show_setting, "Library Search", status, show_log, log_scroll);
 }
 
-void render_search_rebuilding(SDL_Surface* screen, int show_setting, const char* status) {
-    GFX_clear(screen);
-    render_screen_header(screen, "Rebuild Search Index", show_setting);
-
-    const char* msg = (status && status[0]) ? status : "Rebuilding index...";
-    SDL_Surface* text = TTF_RenderUTF8_Blended(Fonts_getMedium(), msg, COLOR_WHITE);
-    if (text) {
-        SDL_BlitSurface(text, NULL, screen, &(SDL_Rect){
-            (screen->w - text->w) / 2,
-            screen->h / 2 - text->h / 2
-        });
-        SDL_FreeSurface(text);
-    }
-
-    GFX_blitButtonGroup((char*[]){"START", "CONTROLS", NULL}, 0, screen, 0);
-    GFX_blitButtonGroup((char*[]){"B", "BACK", NULL}, 1, screen, 1);
+void render_search_rebuilding(SDL_Surface* screen, int show_setting, const char* status,
+                              bool show_log, int log_scroll) {
+    render_index_build_screen(screen, show_setting, "Rebuild Search Index", status, show_log, log_scroll);
 }
 
 void render_search_home(SDL_Surface* screen, int show_setting, int selected, int scroll) {
