@@ -58,7 +58,7 @@ bool Settings_getTooltipArtwork(void);
 void Settings_toggleTooltipArtwork(void);
 const char* Settings_getTooltipArtworkDisplayStr(void);
 
-// Fuzzy search (prefix + trigram fallback)
+// Fuzzy search (fuse.js-style weighted field matching)
 bool Settings_getFuzzySearch(void);
 void Settings_toggleFuzzySearch(void);
 const char* Settings_getFuzzySearchDisplayStr(void);

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "library_index.h"
 #include "metadata_reader.h"
+#include "search_fuse.h"
 #include "playlist_m3u.h"
 #include "playlist.h"
 #include "player.h"
@@ -33,7 +34,7 @@
 #define TOKEN_GROW 16
 #define TOKEN_INIT_CAP 256
 #define TOKEN_HASH_BUCKETS 8192
-#define FUZZY_MIN_TOKEN_LEN 4
+#define FUZZY_MIN_TOKEN_LEN 3
 #define FUZZY_RESULT_THRESHOLD 3
 #define INDEX_BIN_MAGIC 0x49504D4E
 #define FP_MAX_DEPTH 16
@@ -140,6 +141,7 @@ static int token_count = 0;
 static int token_cap = 0;
 
 static TokenHashNode* token_hash[TOKEN_HASH_BUCKETS] = {0};
+static TokenHashNode* token_first_char[37] = {0};
 static TokenHashNode* token_hash_nodes = NULL;
 static int token_hash_node_count = 0;
 static int token_hash_node_cap = 0;
@@ -331,10 +333,45 @@ static void fingerprint_to_string(const LibraryFingerprint* fp, char* out, int o
 
 static void token_hash_clear(void) {
     memset(token_hash, 0, sizeof(token_hash));
+    memset(token_first_char, 0, sizeof(token_first_char));
     free(token_hash_nodes);
     token_hash_nodes = NULL;
     token_hash_node_count = 0;
     token_hash_node_cap = 0;
+}
+
+static int token_first_char_bucket(const char* token) {
+    if (!token || !token[0]) return 36;
+    unsigned char c = (unsigned char)tolower((unsigned char)token[0]);
+    if (c >= 'a' && c <= 'z') return c - 'a';
+    if (c >= '0' && c <= '9') return 26 + (c - '0');
+    return 36;
+}
+
+static bool token_hash_node_push(int token_idx, TokenHashNode*** head) {
+    if (token_idx < 0 || token_idx >= token_count || !head) return false;
+
+    if (token_hash_node_count >= token_hash_node_cap) {
+        int nc = token_hash_node_cap ? token_hash_node_cap * 2 : TOKEN_INIT_CAP;
+        TokenHashNode* nn = realloc(token_hash_nodes, sizeof(TokenHashNode) * nc);
+        if (!nn) {
+            index_log("token_index: hash node realloc failed");
+            return false;
+        }
+        token_hash_nodes = nn;
+        token_hash_node_cap = nc;
+    }
+
+    TokenHashNode* node = &token_hash_nodes[token_hash_node_count++];
+    node->token_idx = token_idx;
+    node->next = *head;
+    *head = node;
+    return true;
+}
+
+static void token_first_char_insert(int token_idx) {
+    int bucket = token_first_char_bucket(tokens[token_idx].token);
+    token_hash_node_push(token_idx, &token_first_char[bucket]);
 }
 
 static void free_index_data(void) {
@@ -360,25 +397,9 @@ static void free_index_data(void) {
 
 static void token_hash_insert(int token_idx) {
     if (token_idx < 0 || token_idx >= token_count) return;
-
-    if (token_hash_node_count >= token_hash_node_cap) {
-        int nc = token_hash_node_cap ? token_hash_node_cap * 2 : TOKEN_INIT_CAP;
-        TokenHashNode* nn = realloc(token_hash_nodes, sizeof(TokenHashNode) * nc);
-        if (!nn) {
-            index_log("token_index: hash node realloc failed");
-            return;
-        }
-        token_hash_nodes = nn;
-        token_hash_node_cap = nc;
-    }
-
-    TokenHashNode* node = &token_hash_nodes[token_hash_node_count++];
-    node->token_idx = token_idx;
-    node->next = NULL;
-
     uint32_t bucket = hash_token_string(tokens[token_idx].token) % TOKEN_HASH_BUCKETS;
-    node->next = token_hash[bucket];
-    token_hash[bucket] = node;
+    token_hash_node_push(token_idx, &token_hash[bucket]);
+    token_first_char_insert(token_idx);
 }
 
 static int find_token(const char* token) {
@@ -499,29 +520,9 @@ static void index_track_tokens(int id) {
     Metadata_foreachNormalizedToken(tr->filename_norm, add_token_cb, &ctx);
 
     index_phrase_token(tr->title_norm, id);
-    index_phrase_token(tr->artist_norm, id);
-    index_phrase_token(tr->album_norm, id);
-    index_phrase_token(tr->genre_norm, id);
-
-    char combined[512];
-    snprintf(combined, sizeof(combined), "%s %s %s %s",
-             tr->title_norm, tr->artist_norm, tr->album_norm, tr->genre_norm);
-    Metadata_foreachNormalizedToken(combined, add_token_cb, &ctx);
 }
 
 static void index_playlist_tokens(int id);
-
-static void clear_token_index(void) {
-    for (int i = 0; i < token_count; i++) {
-        free(tokens[i].track_ids);
-        free(tokens[i].playlist_ids);
-    }
-    free(tokens);
-    tokens = NULL;
-    token_count = 0;
-    token_cap = 0;
-    token_hash_clear();
-}
 
 typedef struct {
     char path[512];
@@ -1383,61 +1384,6 @@ const char* LibraryIndex_getBuildLogLine(int index) {
     return line_buf;
 }
 
-static bool edit_distance_le1(const char* a, const char* b) {
-    if (!a || !b) return false;
-
-    size_t la = strlen(a);
-    size_t lb = strlen(b);
-    if (la == 0 || lb == 0 || la > 31 || lb > 31) return false;
-    if (strcmp(a, b) == 0) return true;
-
-    if (la == lb) {
-        int diff = 0;
-        for (size_t i = 0; i < la; i++) {
-            if (a[i] != b[i] && ++diff > 1) return false;
-        }
-        return diff <= 1;
-    }
-
-    if (la + 1 == lb) {
-        size_t i = 0;
-        size_t j = 0;
-        int skipped = 0;
-        while (i < la && j < lb) {
-            if (a[i] == b[j]) {
-                i++;
-                j++;
-            } else if (skipped == 0) {
-                j++;
-                skipped = 1;
-            } else {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    if (lb + 1 == la) {
-        size_t i = 0;
-        size_t j = 0;
-        int skipped = 0;
-        while (i < la && j < lb) {
-            if (a[i] == b[j]) {
-                i++;
-                j++;
-            } else if (skipped == 0) {
-                i++;
-                skipped = 1;
-            } else {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    return false;
-}
-
 static void add_postings_for_token(int token_idx,
                                    bool* track_matched_token, bool* playlist_matched_token,
                                    int* track_hits, int* playlist_hits) {
@@ -1446,16 +1392,18 @@ static void add_postings_for_token(int token_idx,
     IndexToken* tok = &tokens[token_idx];
     for (int i = 0; i < tok->track_count; i++) {
         int id = tok->track_ids[i];
-        if (id >= 0 && id < track_count && !track_matched_token[id]) {
+        if (id < 0 || id >= track_count) continue;
+        if (track_hits) track_hits[id]++;
+        if (track_matched_token && !track_matched_token[id]) {
             track_matched_token[id] = true;
-            track_hits[id]++;
         }
     }
     for (int i = 0; i < tok->playlist_count; i++) {
         int id = tok->playlist_ids[i];
-        if (id >= 0 && id < playlist_count && !playlist_matched_token[id]) {
+        if (id < 0 || id >= playlist_count) continue;
+        if (playlist_hits) playlist_hits[id]++;
+        if (playlist_matched_token && !playlist_matched_token[id]) {
             playlist_matched_token[id] = true;
-            playlist_hits[id]++;
         }
     }
 }
@@ -1473,126 +1421,159 @@ static void apply_query_token(const char* query_token, bool fuzzy,
 
     if (!fuzzy || strlen(query_token) < FUZZY_MIN_TOKEN_LEN) return;
 
-    uint32_t bucket = hash_token_string(query_token) % TOKEN_HASH_BUCKETS;
-    for (TokenHashNode* n = token_hash[bucket]; n; n = n->next) {
+    int max_err = SearchFuse_maxEditErrors(strlen(query_token), true);
+    int bucket = token_first_char_bucket(query_token);
+    for (TokenHashNode* n = token_first_char[bucket]; n; n = n->next) {
         if (n->token_idx == exact) continue;
-        if (!edit_distance_le1(query_token, tokens[n->token_idx].token)) continue;
+        const char* candidate = tokens[n->token_idx].token;
+        if (!SearchFuse_withinEditDistance(query_token, candidate, max_err)) continue;
         add_postings_for_token(n->token_idx, track_matched_token, playlist_matched_token,
                                track_hits, playlist_hits);
     }
 }
 
-static void count_token_postings(const char query_tokens[][48], int query_token_count, bool fuzzy,
-                                 int* track_hits, int* playlist_hits) {
-    bool* track_matched_token = calloc((size_t)track_count, sizeof(bool));
-    bool* playlist_matched_token = calloc((size_t)playlist_count, sizeof(bool));
-    if (!track_matched_token || !playlist_matched_token) {
-        free(track_matched_token);
-        free(playlist_matched_token);
+static int count_marked(const bool* marks, int count) {
+    int n = 0;
+    for (int i = 0; i < count; i++) {
+        if (marks[i]) n++;
+    }
+    return n;
+}
+
+static void intersect_token_hits(const int* hits, int hit_count, int required,
+                               bool* selected) {
+    for (int i = 0; i < hit_count; i++) {
+        if (hits[i] >= required) selected[i] = true;
+    }
+}
+
+static void union_token_hits(const int* hits, int hit_count, int required,
+                             bool* selected) {
+    for (int i = 0; i < hit_count; i++) {
+        if (hits[i] >= required && !selected[i]) selected[i] = true;
+    }
+}
+
+static void gather_track_candidates(const char query_tokens[][48], int query_token_count,
+                                    bool fuzzy, bool* track_candidate) {
+    if (!track_candidate || query_token_count <= 0) return;
+
+    int* hits = calloc((size_t)track_count, sizeof(int));
+    bool* matched = calloc((size_t)track_count, sizeof(bool));
+    if (!hits || !matched) {
+        free(hits);
+        free(matched);
         return;
     }
 
     for (int q = 0; q < query_token_count; q++) {
-        memset(track_matched_token, 0, (size_t)track_count * sizeof(bool));
-        memset(playlist_matched_token, 0, (size_t)playlist_count * sizeof(bool));
-        apply_query_token(query_tokens[q], fuzzy, track_matched_token, playlist_matched_token,
-                          track_hits, playlist_hits);
-    }
-
-    free(track_matched_token);
-    free(playlist_matched_token);
-}
-
-static bool track_field_contains_token(const char* field, const char* token) {
-    return field && field[0] && token && token[0] && strstr(field, token) != NULL;
-}
-
-static int score_track(int id, const char query_tokens[][48], int query_token_count) {
-    if (id < 0 || id >= track_count) return 0;
-    IndexedTrack* tr = &tracks[id];
-    int score = 0;
-
-    for (int q = 0; q < query_token_count; q++) {
-        const char* qt = query_tokens[q];
-        if (track_field_contains_token(tr->title_norm, qt)) score += 10;
-        if (track_field_contains_token(tr->artist_norm, qt)) score += 8;
-        if (track_field_contains_token(tr->album_norm, qt)) score += 6;
-        if (track_field_contains_token(tr->genre_norm, qt)) score += 4;
-        if (track_field_contains_token(tr->filename_norm, qt)) score += 2;
-    }
-    return score;
-}
-
-static int score_track_with_phrase(int id, const char query_tokens[][48], int query_token_count,
-                                   const char* query_phrase) {
-    int score = score_track(id, query_tokens, query_token_count);
-    if (!query_phrase || !query_phrase[0] || id < 0 || id >= track_count) return score;
-
-    IndexedTrack* tr = &tracks[id];
-    if (track_field_contains_token(tr->title_norm, query_phrase)) score += 15;
-    if (track_field_contains_token(tr->artist_norm, query_phrase)) score += 12;
-    if (track_field_contains_token(tr->album_norm, query_phrase)) score += 10;
-    return score;
-}
-
-static bool track_matches_all_tokens(int id, const char query_tokens[][48], int query_token_count) {
-    if (id < 0 || id >= track_count || query_token_count <= 0) return false;
-
-    IndexedTrack* tr = &tracks[id];
-    const char* fields[] = {
-        tr->title_norm, tr->artist_norm, tr->album_norm, tr->genre_norm, tr->filename_norm
-    };
-
-    for (int q = 0; q < query_token_count; q++) {
-        const char* qt = query_tokens[q];
-        bool found = false;
-        for (int f = 0; f < 5; f++) {
-            if (track_field_contains_token(fields[f], qt)) {
-                found = true;
-                break;
+        memset(hits, 0, (size_t)track_count * sizeof(int));
+        memset(matched, 0, (size_t)track_count * sizeof(bool));
+        apply_query_token(query_tokens[q], false, matched, NULL, hits, NULL);
+        if (q == 0) {
+            intersect_token_hits(hits, track_count, 1, track_candidate);
+        } else {
+            for (int i = 0; i < track_count; i++) {
+                if (track_candidate[i] && hits[i] < 1) track_candidate[i] = false;
             }
         }
-        if (!found) return false;
-    }
-    return true;
-}
-
-static bool track_matches_query(int id, const char query_tokens[][48], int query_token_count,
-                                const char* query_phrase) {
-    if (id < 0 || id >= track_count) return false;
-
-    if (query_phrase && strlen(query_phrase) >= 3) {
-        IndexedTrack* tr = &tracks[id];
-        if (track_field_contains_token(tr->album_norm, query_phrase)) return true;
-        if (track_field_contains_token(tr->artist_norm, query_phrase)) return true;
-        if (track_field_contains_token(tr->title_norm, query_phrase)) return true;
     }
 
-    return track_matches_all_tokens(id, query_tokens, query_token_count);
+    int exact_count = count_marked(track_candidate, track_count);
+    if (!fuzzy || exact_count >= FUZZY_RESULT_THRESHOLD) {
+        free(hits);
+        free(matched);
+        return;
+    }
+
+    memset(track_candidate, 0, (size_t)track_count * sizeof(bool));
+    for (int q = 0; q < query_token_count; q++) {
+        memset(hits, 0, (size_t)track_count * sizeof(int));
+        memset(matched, 0, (size_t)track_count * sizeof(bool));
+        apply_query_token(query_tokens[q], true, matched, NULL, hits, NULL);
+        union_token_hits(hits, track_count, 1, track_candidate);
+    }
+
+    free(hits);
+    free(matched);
 }
 
-static int score_nested_playlist(int id, const char query_tokens[][48], int query_token_count) {
-    if (id < 0 || id >= playlist_count) return 0;
-    IndexedPlaylist* pl = &playlists[id];
-    int score = 0;
+static void gather_playlist_candidates(const char query_tokens[][48], int query_token_count,
+                                       bool fuzzy, bool* playlist_candidate) {
+    if (!playlist_candidate || query_token_count <= 0 || playlist_count <= 0) return;
+
+    int* hits = calloc((size_t)playlist_count, sizeof(int));
+    bool* matched = calloc((size_t)playlist_count, sizeof(bool));
+    if (!hits || !matched) {
+        free(hits);
+        free(matched);
+        return;
+    }
 
     for (int q = 0; q < query_token_count; q++) {
-        const char* qt = query_tokens[q];
-        if (strstr(pl->name_norm, qt)) score += 10;
-        if (strstr(pl->parent_norm, qt)) score += 6;
+        memset(hits, 0, (size_t)playlist_count * sizeof(int));
+        memset(matched, 0, (size_t)playlist_count * sizeof(bool));
+        apply_query_token(query_tokens[q], false, NULL, matched, NULL, hits);
+        if (q == 0) {
+            intersect_token_hits(hits, playlist_count, 1, playlist_candidate);
+        } else {
+            for (int i = 0; i < playlist_count; i++) {
+                if (playlist_candidate[i] && hits[i] < 1) playlist_candidate[i] = false;
+            }
+        }
     }
-    return score;
+
+    int exact_count = count_marked(playlist_candidate, playlist_count);
+    if (!fuzzy || exact_count >= FUZZY_RESULT_THRESHOLD) {
+        free(hits);
+        free(matched);
+        return;
+    }
+
+    memset(playlist_candidate, 0, (size_t)playlist_count * sizeof(bool));
+    for (int q = 0; q < query_token_count; q++) {
+        memset(hits, 0, (size_t)playlist_count * sizeof(int));
+        memset(matched, 0, (size_t)playlist_count * sizeof(bool));
+        apply_query_token(query_tokens[q], true, NULL, matched, NULL, hits);
+        union_token_hits(hits, playlist_count, 1, playlist_candidate);
+    }
+
+    free(hits);
+    free(matched);
 }
 
-static int score_root_playlist(int id, const char query_tokens[][48], int query_token_count) {
+static int score_track_fuse(int id, const char* query_norm,
+                            const char query_tokens[][48], int query_token_count,
+                            bool fuzzy) {
+    if (id < 0 || id >= track_count) return 0;
+    IndexedTrack* tr = &tracks[id];
+    SearchFuseFields fields = {
+        .title = tr->title_norm,
+        .artist = tr->artist_norm,
+        .album = tr->album_norm,
+        .genre = tr->genre_norm,
+        .filename = tr->filename_norm
+    };
+    return SearchFuse_scoreFields(&fields, query_norm, query_tokens, query_token_count, fuzzy);
+}
+
+static int score_playlist_fuse(int id, const char* query_norm,
+                               const char query_tokens[][48], int query_token_count,
+                               bool fuzzy, bool nested) {
     if (id < 0 || id >= playlist_count) return 0;
     IndexedPlaylist* pl = &playlists[id];
-    int score = 0;
-
-    for (int q = 0; q < query_token_count; q++) {
-        if (strstr(pl->name_norm, query_tokens[q])) score += 10;
+    if (nested) {
+        return SearchFuse_scorePlaylist(pl->name_norm, pl->parent_norm,
+                                      query_norm, query_tokens, query_token_count, fuzzy);
     }
-    return score;
+    SearchFuseFields fields = {
+        .title = pl->name_norm,
+        .artist = NULL,
+        .album = NULL,
+        .genre = NULL,
+        .filename = NULL
+    };
+    return SearchFuse_scoreFields(&fields, query_norm, query_tokens, query_token_count, fuzzy);
 }
 
 typedef struct {
@@ -1683,55 +1664,18 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     char query_phrase[512];
     Metadata_copyNormalized(query_phrase, sizeof(query_phrase), query);
 
-    int* track_hits = calloc((size_t)track_count, sizeof(int));
-    int* playlist_hits = calloc((size_t)playlist_count, sizeof(int));
-    bool* track_hit = calloc((size_t)track_count, sizeof(bool));
-    bool* playlist_hit = calloc((size_t)playlist_count, sizeof(bool));
-    if (!track_hits || !playlist_hits || !track_hit || !playlist_hit) {
-        free(track_hits);
-        free(playlist_hits);
-        free(track_hit);
-        free(playlist_hit);
+    bool fuzzy_enabled = Settings_getFuzzySearch();
+    bool* track_candidate = calloc((size_t)track_count, sizeof(bool));
+    bool* playlist_candidate = calloc((size_t)playlist_count, sizeof(bool));
+    if (!track_candidate || !playlist_candidate) {
+        free(track_candidate);
+        free(playlist_candidate);
         pthread_mutex_unlock(&index_mutex);
         return false;
     }
 
-    count_token_postings(query_tokens, query_token_count, false, track_hits, playlist_hits);
-
-    bool fuzzy_enabled = Settings_getFuzzySearch();
-    int exact_track_hits = 0;
-    for (int i = 0; i < track_count; i++) {
-        if (track_hits[i] < query_token_count) continue;
-        if (track_matches_query(i, query_tokens, query_token_count, query_phrase)) {
-            track_hit[i] = true;
-            exact_track_hits++;
-        }
-    }
-
-    for (int i = 0; i < playlist_count; i++) {
-        if (playlist_hits[i] >= query_token_count) {
-            playlist_hit[i] = true;
-        }
-    }
-
-    if (fuzzy_enabled && exact_track_hits < FUZZY_RESULT_THRESHOLD) {
-        memset(track_hits, 0, (size_t)track_count * sizeof(int));
-        memset(playlist_hits, 0, (size_t)playlist_count * sizeof(int));
-        count_token_postings(query_tokens, query_token_count, true, track_hits, playlist_hits);
-
-        for (int i = 0; i < track_count; i++) {
-            if (track_hit[i]) continue;
-            if (track_hits[i] >= query_token_count) {
-                track_hit[i] = true;
-            }
-        }
-
-        for (int i = 0; i < playlist_count; i++) {
-            if (playlist_hits[i] >= query_token_count) {
-                playlist_hit[i] = true;
-            }
-        }
-    }
+    gather_track_candidates(query_tokens, query_token_count, fuzzy_enabled, track_candidate);
+    gather_playlist_candidates(query_tokens, query_token_count, fuzzy_enabled, playlist_candidate);
 
     ScoredItem* nested_items = calloc((size_t)playlist_count, sizeof(ScoredItem));
     ScoredItem* mixed_items = calloc((size_t)(track_count + playlist_count), sizeof(ScoredItem));
@@ -1739,10 +1683,8 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     int mixed_n = 0;
 
     if (!nested_items || !mixed_items) {
-        free(track_hits);
-        free(playlist_hits);
-        free(track_hit);
-        free(playlist_hit);
+        free(track_candidate);
+        free(playlist_candidate);
         free(nested_items);
         free(mixed_items);
         pthread_mutex_unlock(&index_mutex);
@@ -1750,11 +1692,12 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     }
 
     for (int i = 0; i < playlist_count; i++) {
-        if (!playlist_hit[i]) continue;
+        if (!playlist_candidate[i]) continue;
         if (playlists[i].is_root) continue;
 
-        int sc = score_nested_playlist(i, query_tokens, query_token_count);
-        if (sc <= 0) sc = 1;
+        int sc = score_playlist_fuse(i, query_phrase, query_tokens, query_token_count,
+                                     fuzzy_enabled, true);
+        if (sc < SEARCH_FUSE_MIN_SCORE) continue;
         nested_items[nested_n++] = (ScoredItem){
             .id = i, .score = sc, .type = SEARCH_ITEM_NESTED_PLAYLIST
         };
@@ -1770,19 +1713,20 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
     }
 
     for (int i = 0; i < track_count; i++) {
-        if (!track_hit[i]) continue;
-        int sc = score_track_with_phrase(i, query_tokens, query_token_count, query_phrase);
-        if (sc <= 0) sc = 1;
+        if (!track_candidate[i]) continue;
+        int sc = score_track_fuse(i, query_phrase, query_tokens, query_token_count, fuzzy_enabled);
+        if (sc < SEARCH_FUSE_MIN_SCORE) continue;
         mixed_items[mixed_n++] = (ScoredItem){
             .id = i, .score = sc, .type = SEARCH_ITEM_TRACK
         };
     }
     for (int i = 0; i < playlist_count; i++) {
-        if (!playlist_hit[i]) continue;
+        if (!playlist_candidate[i]) continue;
         if (!playlists[i].is_root) continue;
 
-        int sc = score_root_playlist(i, query_tokens, query_token_count);
-        if (sc <= 0) sc = 1;
+        int sc = score_playlist_fuse(i, query_phrase, query_tokens, query_token_count,
+                                     fuzzy_enabled, false);
+        if (sc < SEARCH_FUSE_MIN_SCORE) continue;
         mixed_items[mixed_n++] = (ScoredItem){
             .id = i, .score = sc, .type = SEARCH_ITEM_USER_PLAYLIST
         };
@@ -1802,10 +1746,8 @@ bool LibraryIndex_search(const char* query, SearchResults* out) {
 
     bool has_results = out->nested_count > 0 || out->mixed_count > 0;
 
-    free(track_hits);
-    free(playlist_hits);
-    free(track_hit);
-    free(playlist_hit);
+    free(track_candidate);
+    free(playlist_candidate);
     free(nested_items);
     free(mixed_items);
     pthread_mutex_unlock(&index_mutex);
